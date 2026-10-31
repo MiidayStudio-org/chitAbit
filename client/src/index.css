@@ -1,0 +1,184 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+@variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-vsc-bg: var(--vscode-editor-bg);
+  --color-vsc-sidebar: var(--vscode-sidebar-bg);
+  --color-vsc-activitybar: var(--vscode-activitybar-bg);
+  --color-vsc-tabs: var(--vscode-tabs-bg);
+  --color-vsc-tabActive: var(--vscode-tab-active-bg);
+  --color-vsc-tabInactive: var(--vscode-tab-inactive-bg);
+  --color-vsc-statusbar: var(--vscode-statusbar-bg);
+  --color-vsc-border: var(--vscode-border);
+  --color-vsc-fg: var(--vscode-fg);
+  --color-vsc-muted: var(--vscode-muted);
+  --color-vsc-accent: var(--vscode-accent);
+  --color-vsc-lineHighlight: var(--vscode-line-highlight);
+  --color-vsc-selection: var(--vscode-selection);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+}
+
+:root {
+  /* Default: VS Code Dark+ */
+  --bg: #1e1e1e;
+  --sidebar: #252526;
+  --activity-bar: #333333;
+  --tab-active: #1e1e1e;
+  --tab-inactive: #2d2d2d;
+  --border: #3c3c3c;
+  --text: #cccccc;
+  --muted: #858585;
+  --accent: #007acc;
+  --status-bar: #007acc;
+  --status-bar-fg: #ffffff;
+  --input-bg: #3c3c3c;
+  --line-highlight: #2a2d2e;
+  --selection: #04395e;
+
+  /* VS Code compatibility aliases */
+  --vscode-editor-bg: var(--bg);
+  --vscode-sidebar-bg: var(--sidebar);
+  --vscode-activitybar-bg: var(--activity-bar);
+  --vscode-tabs-bg: var(--tab-inactive);
+  --vscode-tab-active-bg: var(--tab-active);
+  --vscode-tab-inactive-bg: var(--tab-inactive);
+  --vscode-statusbar-bg: var(--status-bar);
+  --vscode-border: var(--border);
+  --vscode-fg: var(--text);
+  --vscode-muted: var(--muted);
+  --vscode-accent: var(--accent);
+  --vscode-line-highlight: var(--line-highlight);
+  --vscode-selection: var(--selection);
+}
+
+html.light-plus {
+  /* VS Code Light+ */
+  --bg: #ffffff;
+  --sidebar: #f3f3f3;
+  --activity-bar: #2c2c2c;
+  --tab-active: #ffffff;
+  --tab-inactive: #ececec;
+  --border: #e7e7e7;
+  --text: #333333;
+  --muted: #717171;
+  --accent: #007acc;
+  --status-bar: #007acc;
+  --status-bar-fg: #ffffff;
+  --input-bg: #ffffff;
+  --line-highlight: #f0f0f0;
+  --selection: #add6ff;
+}
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.3);
+    border-radius: 0;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgba(128, 128, 128, 0.5);
+  }
+}
+
+/* Shiki code block styles */
+.shiki {
+  background: transparent !important;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow-x: auto;
+}
+
+.shiki code {
+  display: block;
+}
+
+/* Inline code style */
+code.vscode-inline {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  background-color: rgba(128, 128, 128, 0.17);
+  color: #ce9178;
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+}
+
+html.light-plus code.vscode-inline {
+  color: #a31515;
+}
+
+.vscode-mention {
+  color: #4fc1ff;
+  font-weight: 600;
+}
+
+html.light-plus .vscode-mention {
+  color: #007acc;
+}
+
+.vscode-command {
+  color: #c586c0;
+  font-weight: 600;
+}
+
+html.light-plus .vscode-command {
+  color: #af00db;
+}
+
+.vscode-link {
+  color: #3794ff;
+  text-decoration: underline;
+}
+
+html.light-plus .vscode-link {
+  color: #0066cc;
+}
+
+/* Shiki token-highlighted message styling */
+.shiki-message-body {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
+  font-size: 13px !important;
+  line-height: 1.5 !important;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+}
+
+.shiki-message-body pre.shiki,
+.shiki-message-body pre {
+  background: transparent !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  display: inline !important;
+}
+
+.shiki-message-body code {
+  font-family: inherit !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+
