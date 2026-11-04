@@ -52,3 +52,15 @@ export function validateChannelName(name: string): { valid: boolean; error?: str
   }
   return { valid: true };
 }
+
+// Pagination query params: clamp so nobody can ask for millions of rows
+export function parseLimit(value: unknown, fallback = 40): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(Math.floor(n), 100);
+}
+
+export function parseBefore(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}

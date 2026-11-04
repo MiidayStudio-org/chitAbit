@@ -81,3 +81,16 @@ CREATE INDEX IF NOT EXISTS idx_messages_dm ON messages(sender_id, dm_recipient_i
 CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
 CREATE INDEX IF NOT EXISTS idx_friends_user ON friends(user_id);
 CREATE INDEX IF NOT EXISTS idx_friend_requests_receiver ON friend_requests(receiver_id, status);
+
+-- When each user last read each channel (used for unread counts).
+-- DMs use messages.read_at instead.
+CREATE TABLE IF NOT EXISTS channel_reads (
+  user_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  last_read_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, channel_id),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_dm_unread ON messages(dm_recipient_id, read_at);

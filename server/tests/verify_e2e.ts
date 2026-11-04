@@ -5,26 +5,29 @@ async function runVerification() {
 
   // 1. Authenticate Alice and Bob
   console.log('1. Authenticating users via REST API...');
-  const resAlice = await fetch('http://localhost:3001/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'alice_dev' }),
-  });
-  const alice = (await resAlice.json()).user;
+  // Register (first run) or log in (later runs) and get a token
+  async function authenticate(username: string) {
+    const body = JSON.stringify({ username, password: 'e2e_password_123' });
+    const headers = { 'Content-Type': 'application/json' };
+    let res = await fetch('http://localhost:3001/api/auth/login', { method: 'POST', headers, body });
+    if (!res.ok) {
+      res = await fetch('http://localhost:3001/api/auth/register', { method: 'POST', headers, body });
+    }
+    const data = await res.json();
+    if (!data.token) throw new Error(`Could not authenticate ${username}: ${data.error}`);
+    return { ...data.user, token: data.token as string };
+  }
+
+  const alice = await authenticate('alice_dev');
   console.log(`   ✓ Alice authenticated: ID=${alice.id}, Color=${alice.avatarColor}`);
 
-  const resBob = await fetch('http://localhost:3001/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'bob_dev' }),
-  });
-  const bob = (await resBob.json()).user;
+  const bob = await authenticate('bob_dev');
   console.log(`   ✓ Bob authenticated: ID=${bob.id}, Color=${bob.avatarColor}`);
 
-  // 2. Connect both Socket.IO clients
+  // 2. Connect both Socket.IO clients (token is required now)
   console.log('\n2. Connecting real-time Socket.IO clients...');
-  const socketAlice = io('http://localhost:3001');
-  const socketBob = io('http://localhost:3001');
+  const socketAlice = io('http://localhost:3001', { auth: { token: alice.token } });
+  const socketBob = io('http://localhost:3001', { auth: { token: bob.token } });
 
   await Promise.all([
     new Promise<void>((resolve) => socketAlice.on('connect', () => resolve())),

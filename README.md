@@ -31,12 +31,19 @@ A modern, developer-first real-time chat application featuring rich Markdown, sy
 - **Default Channels**: `#general`, `#javascript`, `#python`, `#devops`, `#ai-ml`, `#help`.
 - **Create Channels**: Custom channel creation with description support.
 - **Direct Messaging**: 1-on-1 private messaging with teammates or DevBot.
-- **Unread Badges**: Real-time counter of unread messages per channel and DM.
+- **Unread Badges**: Unread counts per channel and DM, stored on the server so they survive a refresh.
 - **Reactions & Message Management**:
   - Add/remove emoji reactions (`👍`, `❤️`, `🚀`, `🔥`, `🐛`, `👀`, `💯`)
-  - Edit and delete your own messages
+  - Edit and delete your own messages (deletes are soft: hidden everywhere, row kept)
+- **Friends**: Friend requests with live notifications, accept/decline, unfriend.
 - **Active Presence & Typing Indicators**: Real-time online member count and typing indicator for users and DevBot.
-- **Passwordless Login**: Instant login with persisted sessions via `localStorage`.
+- **Login**: Username + password (bcrypt), 30-day JWT session saved in `localStorage`.
+
+### 🔒 Security
+- Every REST route (except login/register) and every socket connection requires a valid JWT.
+- The server always takes the user from the token, never from ids sent by the client.
+- Login/register are rate limited per IP; messages, live drafts and DevBot each have their own per-user limit.
+- Input is sanitized against XSS; uploads are limited to safe types (no SVG/HTML) and served with safe headers.
 
 ### 🤖 DevBot (Senior AI Engineer)
 - **Always Available**: Present in every channel and in direct messages.
@@ -46,6 +53,7 @@ A modern, developer-first real-time chat application featuring rich Markdown, sy
   - Direct message DevBot
 - **Senior Persona**: Direct, senior staff engineer answers. Explains architecture, uncovers bugs, and suggests modern best practices in Markdown.
 - **Context-Aware**: Pulls up to the last 15 messages in the channel or DM conversation for contextual debugging.
+- **Rate Limited**: 5 questions per user per minute by default (`DEVBOT_MAX_PER_MINUTE`), to protect the Gemini quota.
 - **Real-Time Token Streaming**: Streams responses token-by-token with an animated typing status.
 - **Graceful Error Handling & Demo Mode**:
   - If `GEMINI_API_KEY` is not provided, DevBot automatically runs in **Interactive Demo Mode**, providing guidance and mock technical tips without crashing.
@@ -66,7 +74,11 @@ A modern, developer-first real-time chat application featuring rich Markdown, sy
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
-- Node.js (v18+) and npm installed.
+- Node.js 20 or 22 LTS (recommended) and npm.
+- `better-sqlite3` is a native module. If no prebuilt binary exists for your Node version
+  (for example very new Node releases on Windows), npm compiles it and needs build tools:
+  on Windows, Visual Studio with **"Desktop development with C++"** and a **Windows SDK**.
+  Using Node 22 LTS usually avoids this.
 
 ### 2. Environment Setup
 Copy the example environment file:
@@ -74,11 +86,27 @@ Copy the example environment file:
 cp .env.example .env
 ```
 
-Open `.env` and add your Google Gemini API key:
+Open `.env` and set at least:
 ```env
 PORT=3001
 GEMINI_API_KEY=your_gemini_api_key_here
+JWT_SECRET=a_long_random_string
 ```
+
+Generate a `JWT_SECRET` with:
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+```
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `PORT` | no | Server port (default 3001) |
+| `GEMINI_API_KEY` | no | DevBot. Empty = Demo Mode |
+| `JWT_SECRET` | **yes in production** | Signs login tokens. Server refuses to start in production without it |
+| `GEMINI_MODEL` | no | Gemini model (default `gemini-2.5-flash`) |
+| `DEVBOT_MAX_PER_MINUTE` | no | DevBot questions per user per minute (default 5) |
+| `CLIENT_ORIGIN` | production | Allowed frontend URL(s) for CORS, comma-separated |
+| `DB_PATH` | no | SQLite file (default `data/chat.db`) |
 
 > **🔑 How to get a Gemini API key:**
 > 1. Visit [Google AI Studio](https://aistudio.google.com/).
@@ -112,10 +140,53 @@ The application will be live at:
 
 ## 🧪 Running Tests
 
-To run the automated tests covering API endpoints, slash commands, and the DevBot service:
+To run the automated tests covering auth and access control, channels, unread counts, friends, socket events, slash commands, and the DevBot service:
 ```bash
 npm test
 ```
+
+Tests use an in-memory database, so they never touch `data/chat.db`.
+
+---
+
+## 🔌 API Reference
+
+All routes except `POST /api/auth/login` and `POST /api/auth/register` need
+`Authorization: Bearer <token>`. Sockets connect with `io('/', { auth: { token } })`.
+
+| Method | Route | What it does |
+|---|---|---|
+| POST | `/api/auth/register` | `{ username, password, displayName? }` → `{ token, user }` |
+| POST | `/api/auth/login` | `{ username, password }` → `{ token, user }` |
+| GET | `/api/auth/me` | Your profile |
+| PUT | `/api/auth/profile` | Update your profile and settings |
+| GET | `/api/channels` | All channels (defaults first) |
+| POST | `/api/channels` | `{ name, description? }` create a channel |
+| GET | `/api/channels/:id/messages` | History (`?limit=`, `?before=`) |
+| GET | `/api/messages/dm/:me/:other` | DM history (you must be one of the two) |
+| GET | `/api/messages/unread` | `{ unreadCounts: { channelId or userId: n } }` |
+| POST | `/api/messages/read` | `{ channelId }` or `{ senderId }` mark as read |
+| GET | `/api/messages/search` | `?q=` plus optional `channelId` or `user1Id`/`user2Id` |
+| PUT / DELETE | `/api/messages/:id` | Edit / delete your own message |
+| GET | `/api/friends` | Your friends |
+| GET | `/api/friends/search` | `?q=` find users |
+| GET | `/api/friends/requests` | Pending `{ incoming, outgoing }` |
+| POST | `/api/friends/request` | `{ targetUserId }` or `{ targetUsername }` |
+| POST | `/api/friends/respond` | `{ requestId, action: 'accept' \| 'decline' }` |
+| DELETE | `/api/friends/:friendId` | Unfriend |
+| GET | `/api/users` | All users |
+| POST | `/api/users/start-dm` | `{ username }` look up an existing user |
+| POST | `/api/upload` | `multipart/form-data` field `file` (max 5 MB) |
+
+**Socket events.** Client → server: `user:join`, `channel:switch`, `dm:switch`,
+`message:send`, `message:edit`, `message:delete`, `message:read`, `channel:read`,
+`reaction:toggle`, `typing:start`, `typing:stop`, `draft:update`, `draft:clear`.
+Server → client: `message:new`, `message:edited`, `message:deleted`, `reaction:updated`,
+`message:read_receipt`, `typing:status`, `presence:update`, `draft:update`, `draft:cleared`,
+`draft:sync`, `bot:typing`, `bot:stream:chunk`, `bot:stream:end`, `channel:created`,
+`friend_request:received`, `friend_request:accepted`, `message:rate_limit`, `chat:clear`, `error`.
+
+See [`docs/frontend-handoff.md`](docs/frontend-handoff.md) for how the client is wired to these.
 
 ---
 

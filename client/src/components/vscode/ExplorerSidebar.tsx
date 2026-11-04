@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { User, ActiveChat, FriendRequest, NavigationTab } from '../../types';
+import { User, ActiveChat, FriendRequest, NavigationTab, Channel } from '../../types';
+import { channelToChat } from '../../utils/chatUtils';
 import {
   ChevronDown,
   ChevronRight,
@@ -22,9 +23,11 @@ export interface ExplorerSidebarProps {
   activeChat: ActiveChat | null;
   unreadCounts: Record<string, number>;
   typingUserIds?: Set<string>;
-  isGeneralTyping?: boolean;
+  channels: Channel[];
+  typingChannelIds?: Set<string>;
   isBotTyping?: boolean;
   onSelectChat: (chat: ActiveChat) => void;
+  onCreateChannel: () => void;
   onOpenAddFriend: () => void;
   onRespondFriendRequest: (requestId: string, action: 'accept' | 'decline') => void;
   onRemoveFriend: (friendId: string) => void;
@@ -39,9 +42,11 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   activeChat,
   unreadCounts,
   typingUserIds,
-  isGeneralTyping = false,
+  channels,
+  typingChannelIds,
   isBotTyping = false,
   onSelectChat,
+  onCreateChannel,
   onOpenAddFriend,
   onRespondFriendRequest,
   onRemoveFriend,
@@ -57,14 +62,19 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
 
   const onlineUserIds = useMemo(() => new Set(onlineUsers.map((u) => u.id)), [onlineUsers]);
 
-  const generalChat: ActiveChat = {
-    type: 'channel',
-    id: 'general',
-    name: 'general',
-    displayName: 'general',
-    fileIcon: 'folder',
-    description: 'General discussion for all chitAbit members',
-  };
+  // Until the list arrives from the server, still show #general so the sidebar isn't empty
+  const visibleChannels: Channel[] = useMemo(
+    () =>
+      channels.length > 0
+        ? channels
+        : [{ id: 'general', name: 'general', description: null, created_by: 'system', created_at: 0 }],
+    [channels]
+  );
+
+  const channelUnreadTotal = useMemo(
+    () => visibleChannels.reduce((sum, ch) => sum + (unreadCounts[ch.id] || 0), 0),
+    [visibleChannels, unreadCounts]
+  );
 
   const devbotChat: ActiveChat = {
     type: 'dm',
@@ -210,61 +220,77 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
 
         {/* Section 1: CHANNELS */}
         <div>
-          <button
-            type="button"
-            id="explorer-channels-header"
-            onClick={() => setChannelsOpen(!channelsOpen)}
-            className="w-full px-2 py-1 flex items-center justify-between font-bold text-[11px] tracking-wider uppercase text-[#bbbbbb] light-plus:text-[#666666] hover:bg-[#2a2d2e] light-plus:hover:bg-[#e8e8e8] cursor-pointer text-left"
-          >
-            <div className="flex items-center gap-1">
+          <div className="w-full flex items-center justify-between hover:bg-[#2a2d2e] light-plus:hover:bg-[#e8e8e8]">
+            <button
+              type="button"
+              id="explorer-channels-header"
+              onClick={() => setChannelsOpen(!channelsOpen)}
+              className="flex-1 px-2 py-1 flex items-center gap-1 font-bold text-[11px] tracking-wider uppercase text-[#bbbbbb] light-plus:text-[#666666] cursor-pointer text-left"
+            >
               {channelsOpen ? (
                 <ChevronDown className="w-3.5 h-3.5" />
               ) : (
                 <ChevronRight className="w-3.5 h-3.5" />
               )}
               <span>CHANNELS</span>
+            </button>
+            <div className="flex items-center gap-1 pr-2">
+              {channelUnreadTotal > 0 && (
+                <span className="min-w-[16px] h-4 px-1 bg-[#007acc] text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                  {channelUnreadTotal}
+                </span>
+              )}
+              <button
+                type="button"
+                id="explorer-create-channel"
+                title="Create Channel"
+                aria-label="Create Channel"
+                onClick={onCreateChannel}
+                className="p-0.5 rounded text-[#cccccc] light-plus:text-[#555555] hover:bg-[#37373d] light-plus:hover:bg-[#e0e0e0] cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
             </div>
-            {unreadCounts['general'] > 0 && (
-              <span className="min-w-[16px] h-4 px-1 bg-[#007acc] text-white text-[9px] font-bold rounded-full flex items-center justify-center">
-                {unreadCounts['general']}
-              </span>
-            )}
-          </button>
+          </div>
 
           {channelsOpen && (
             <div className="pl-4 pr-2">
-              <button
-                type="button"
-                id="explorer-item-general"
-                onClick={() => onSelectChat(generalChat)}
-                className={`w-full flex items-center justify-between px-2 py-1.5 rounded-sm cursor-pointer transition-colors text-left ${
-                  activeChat?.id === 'general'
-                    ? 'bg-[var(--selection)] text-white font-semibold'
-                    : 'hover:bg-[var(--line-highlight)] text-[var(--text)]'
-                }`}
-              >
-                <div className="flex items-center gap-2 truncate">
-                  <FileIcon
-                    isFolder={true}
-                    isOpenFolder={activeChat?.id === 'general'}
-                    size={16}
-                  />
-                  <span className="truncate">general/</span>
-                  {isGeneralTyping && (
-                    <span
-                      className="inline-flex items-center text-[#007acc] font-bold text-xs animate-pulse tracking-widest ml-0.5"
-                      title="Someone is typing in general..."
-                    >
-                      ...
-                    </span>
-                  )}
-                </div>
-                {unreadCounts['general'] > 0 && (
-                  <span className="min-w-[16px] h-4 px-1 bg-[#007acc] text-white text-[9px] font-bold rounded-full flex items-center justify-center">
-                    {unreadCounts['general']}
-                  </span>
-                )}
-              </button>
+              {visibleChannels.map((channel) => {
+                const isSelected = activeChat?.type === 'channel' && activeChat.id === channel.id;
+                const unread = unreadCounts[channel.id] || 0;
+                return (
+                  <button
+                    key={channel.id}
+                    type="button"
+                    id={`explorer-item-${channel.id}`}
+                    title={channel.description || channel.name}
+                    onClick={() => onSelectChat(channelToChat(channel))}
+                    className={`w-full flex items-center justify-between px-2 py-1.5 rounded-sm cursor-pointer transition-colors text-left ${
+                      isSelected
+                        ? 'bg-[var(--selection)] text-white font-semibold'
+                        : 'hover:bg-[var(--line-highlight)] text-[var(--text)]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <FileIcon isFolder={true} isOpenFolder={isSelected} size={16} />
+                      <span className="truncate">{channel.name}/</span>
+                      {typingChannelIds?.has(channel.id) && (
+                        <span
+                          className="inline-flex items-center text-[#007acc] font-bold text-xs animate-pulse tracking-widest ml-0.5"
+                          title={`Someone is typing in ${channel.name}...`}
+                        >
+                          ...
+                        </span>
+                      )}
+                    </div>
+                    {unread > 0 && (
+                      <span className="min-w-[16px] h-4 px-1 bg-[#007acc] text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                        {unread}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>

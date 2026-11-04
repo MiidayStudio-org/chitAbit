@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from '../types';
+import { UNAUTHORIZED_EVENT } from '../utils/authFetch';
 
 interface AuthContextType {
   user: User | null;
@@ -169,6 +170,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('chitabit_user');
     localStorage.removeItem('chitabit_token');
   };
+
+  // Token expired, invalid, or user deleted: the server answered 401, so log out.
+  useEffect(() => {
+    window.addEventListener(UNAUTHORIZED_EVENT, logout);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, logout);
+  }, []);
 
   return (
     <AuthContext.Provider value={{ user, token, isLoading, login, register, updateProfile, logout }}>

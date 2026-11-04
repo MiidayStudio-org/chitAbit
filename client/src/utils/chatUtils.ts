@@ -1,4 +1,4 @@
-import { Message, Channel } from '../types';
+import { Message, Channel, ActiveChat } from '../types';
 
 /**
  * Derives a 2-letter fallback uppercase initial string from a display name or username.
@@ -130,4 +130,19 @@ export function shouldGroupMessage(curr: Message, prev: Message | null): boolean
   if (curr.deleted_at || prev.deleted_at) return false;
   const fiveMinutesInMs = 5 * 60 * 1000;
   return Math.abs(curr.created_at - prev.created_at) <= fiveMinutesInMs;
+}
+
+/**
+ * Turns a channel from the server into the ActiveChat shape used by tabs,
+ * the sidebar and the command palette.
+ */
+export function channelToChat(channel: Channel): ActiveChat {
+  return {
+    type: 'channel',
+    id: channel.id,
+    name: channel.name,
+    displayName: channel.name,
+    fileIcon: 'folder',
+    description: channel.description || undefined,
+  };
 }

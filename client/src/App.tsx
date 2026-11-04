@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from './context/AuthContext';
 import { useSocket } from './context/SocketContext';
-import { User, Message, LastMessage, ActiveChat, NavigationTab, FriendRequest, OpenTab, LiveDraft } from './types';
+import { User, Message, LastMessage, ActiveChat, NavigationTab, FriendRequest, OpenTab, LiveDraft, Channel } from './types';
+import { CreateChannelModal } from './components/modals/CreateChannelModal';
+import { channelToChat } from './utils/chatUtils';
 import { ActivityBar } from './components/vscode/ActivityBar';
 import { ExplorerSidebar } from './components/vscode/ExplorerSidebar';
 import { EditorTabsBar } from './components/vscode/EditorTabsBar';
@@ -53,11 +55,16 @@ export const App: React.FC = () => {
   // Editor Tabs State
   const [openTabs, setOpenTabs] = useState<OpenTab[]>(DEFAULT_TABS);
   const [activeTabId, setActiveTabId] = useState<string | null>('general');
+  // Latest open tab id, readable inside callbacks without re-creating them
+  const activeTabIdRef = React.useRef<string | null>(activeTabId);
+  activeTabIdRef.current = activeTabId;
 
   // Friends & Social Data
   const [friends, setFriends] = useState<User[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [isCreateChannelOpen, setIsCreateChannelOpen] = useState(false);
   const [, setLastMessages] = useState<Record<string, LastMessage>>({});
 
   // Chat Feed State
@@ -187,12 +194,81 @@ export const App: React.FC = () => {
     }
   }, [user]);
 
+  // Fetch all channels (6 defaults + custom ones)
+  const fetchChannels = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await fetch('/api/channels');
+      const data = await res.json();
+      if (Array.isArray(data.channels)) setChannels(data.channels);
+    } catch (err) {
+      console.error('Failed to load channels:', err);
+    }
+  }, [user]);
+
+  // Unread counts are stored on the server, so badges survive a refresh.
+  // The chat that is open right now is never shown as unread.
+  const fetchUnreadCounts = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await fetch('/api/messages/unread');
+      const data = await res.json();
+      if (data.unreadCounts) {
+        const counts: Record<string, number> = { ...data.unreadCounts };
+        if (activeTabIdRef.current) delete counts[activeTabIdRef.current];
+        setUnreadCounts(counts);
+      }
+    } catch (err) {
+      console.error('Failed to load unread counts:', err);
+    }
+  }, [user]);
+
   useEffect(() => {
     if (user) {
       fetchFriends();
       fetchFriendRequests();
+      fetchChannels();
+      fetchUnreadCounts();
     }
-  }, [user, fetchFriends, fetchFriendRequests]);
+  }, [user, fetchFriends, fetchFriendRequests, fetchChannels, fetchUnreadCounts]);
+
+  // After a reconnect we may have missed messages: resync channels and badges
+  useEffect(() => {
+    if (!socket) return;
+    const resync = () => {
+      fetchChannels();
+      fetchUnreadCounts();
+    };
+    socket.on('connect', resync);
+    return () => {
+      socket.off('connect', resync);
+    };
+  }, [socket, fetchChannels, fetchUnreadCounts]);
+
+  // Create a channel on the server, then open it
+  const handleCreateChannel = useCallback(
+    async (name: string, description: string): Promise<{ success: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/channels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, description }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { success: false, error: data.error || 'Failed to create channel' };
+
+        const channel: Channel = data.channel;
+        setChannels((prev) => (prev.some((c) => c.id === channel.id) ? prev : [...prev, channel]));
+        handleSelectChat(channelToChat(channel));
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Network error' };
+      }
+    },
+    // handleSelectChat is declared below; it is only called later, when the user submits
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   // Tab management handlers
   const handleSelectChat = useCallback((chat: ActiveChat) => {
@@ -355,8 +431,8 @@ export const App: React.FC = () => {
           }));
         }
 
-        // Emit read receipt to sender and server
-        if (socket && activeChat.id !== 'devbot') {
+        // Mark this DM as read on the server (DevBot too, so its unread badge clears)
+        if (socket) {
           socket.emit('message:read', {
             dmSenderId: activeChat.id,
             currentUserId: user.id,
@@ -372,15 +448,32 @@ export const App: React.FC = () => {
     fetchMessages();
   }, [fetchMessages]);
 
-  // Notify socket of active room switch to join rooms and sync live drafts
-  useEffect(() => {
+  // Tell the server which chat is open (live drafts, and unread tracking:
+  // messages in the open chat are not counted as unread)
+  const announceOpenChat = useCallback(() => {
     if (!socket || !user || !activeChat) return;
     if (activeChat.type === 'channel') {
       socket.emit('channel:switch', { channelId: activeChat.id });
-    } else if (activeChat.type === 'dm' && activeChat.id !== 'devbot') {
+    } else if (activeChat.type === 'dm') {
+      // Also for DevBot, so the server knows we left the channel
       socket.emit('dm:switch', { recipientId: activeChat.id });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, user, activeChat?.type, activeChat?.id]);
+
+  useEffect(() => {
+    announceOpenChat();
+  }, [announceOpenChat]);
+
+  // After a (re)connect the server starts fresh at #general: re-send the open chat.
+  // SocketContext's own 'connect' handler (user:join) runs first.
+  useEffect(() => {
+    if (!socket) return;
+    socket.on('connect', announceOpenChat);
+    return () => {
+      socket.off('connect', announceOpenChat);
+    };
+  }, [socket, announceOpenChat]);
 
   // Load older messages (infinite scroll upward)
   const handleLoadOlderMessages = async () => {
@@ -414,15 +507,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!socket || !user) return;
 
-    // 1. Join user private room
-    socket.emit('user:join', {
-      id: user.id,
-      username: user.username,
-      displayName: user.displayName || user.username,
-      avatarColor: user.avatarColor,
-      fileIcon: user.fileIcon || 'ts',
-      channelId: activeChat?.type === 'channel' ? activeChat.id : 'general',
-    });
+    // 1. `user:join` is sent once per connection by SocketContext. It must not be
+    //    re-sent on every chat change: it used to reset the server's idea of which
+    //    chat is open to #general, which broke unread tracking while in a DM.
 
     // 2. Incoming New Message
     const handleNewMessage = (msg: Message) => {
@@ -613,6 +700,22 @@ export const App: React.FC = () => {
       setTimeout(() => setRateLimitNotice(null), 4000);
     };
 
+    // 11b. Server rejected something (unknown channel, message too long, ...): show it
+    const handleServerError = (data: { message?: string }) => {
+      handleRateLimit({ message: data?.message || 'Something went wrong' });
+    };
+
+    // 11c. `/clear` only clears this user's screen
+    const handleChatClear = () => {
+      setMessages([]);
+      setHasMoreOlderMessages(false);
+    };
+
+    // 11d. Someone created a channel: add it to the sidebar
+    const handleChannelCreated = (channel: Channel) => {
+      setChannels((prev) => (prev.some((c) => c.id === channel.id) ? prev : [...prev, channel]));
+    };
+
     // 12. Real-time friend alerts
     const handleFriendRequestReceived = () => {
       fetchFriendRequests();
@@ -693,8 +796,14 @@ export const App: React.FC = () => {
     socket.on('message:rate_limit', handleRateLimit);
     socket.on('friend_request:received', handleFriendRequestReceived);
     socket.on('friend_request:accepted', handleFriendRequestAccepted);
+    socket.on('error', handleServerError);
+    socket.on('chat:clear', handleChatClear);
+    socket.on('channel:created', handleChannelCreated);
 
     return () => {
+      socket.off('error', handleServerError);
+      socket.off('chat:clear', handleChatClear);
+      socket.off('channel:created', handleChannelCreated);
       socket.off('message:new', handleNewMessage);
       socket.off('message:read_receipt', handleReadReceipt);
       socket.off('bot:stream:chunk', handleBotChunk);
@@ -811,33 +920,30 @@ export const App: React.FC = () => {
   }, [socket, activeChat]);
 
   // Compute live typing indicators for Explorer Sidebar
-  const { typingUserIdsSet, isGeneralTypingComputed } = useMemo(() => {
+  const { typingUserIdsSet, typingChannelIdsSet } = useMemo(() => {
     const ids = new Set<string>();
-    let generalTyping = false;
+    const channelIds = new Set<string>(); // channels where someone is typing
 
     // Normal typing indicator users
     for (const u of typingUsers) {
       ids.add(u);
       const friend = friends.find((f) => f.username === u);
       if (friend) ids.add(friend.id);
-      if (activeChat?.type === 'channel' && activeChat.id === 'general') {
-        generalTyping = true;
+      if (activeChat?.type === 'channel') {
+        channelIds.add(activeChat.id);
       }
     }
 
     // Live draft typers
     for (const d of liveDrafts) {
       if (d.senderId === user?.id) continue;
-      if (d.channelId === 'general' && d.text && d.text.length > 0) {
-        generalTyping = true;
-      }
-      if (d.text && d.text.length > 0) {
-        ids.add(d.senderId);
-        ids.add(d.senderUsername);
-      }
+      if (!d.text || d.text.length === 0) continue;
+      if (d.channelId) channelIds.add(d.channelId);
+      ids.add(d.senderId);
+      ids.add(d.senderUsername);
     }
 
-    return { typingUserIdsSet: ids, isGeneralTypingComputed: generalTyping };
+    return { typingUserIdsSet: ids, typingChannelIdsSet: channelIds };
   }, [typingUsers, friends, activeChat, liveDrafts, user?.id]);
 
   const handleEditMessage = (messageId: string, content: string) => {
@@ -916,7 +1022,9 @@ export const App: React.FC = () => {
             activeChat={activeChat}
             unreadCounts={unreadCounts}
             typingUserIds={typingUserIdsSet}
-            isGeneralTyping={isGeneralTypingComputed}
+            channels={channels}
+            typingChannelIds={typingChannelIdsSet}
+            onCreateChannel={() => setIsCreateChannelOpen(true)}
             isBotTyping={isBotTyping}
             onSelectChat={handleSelectChat}
             onOpenAddFriend={() => setIsAddFriendOpen(true)}
@@ -1095,6 +1203,8 @@ export const App: React.FC = () => {
         isOpen={isCommandPaletteOpen}
         onClose={() => setIsCommandPaletteOpen(false)}
         friends={friends}
+        channels={channels}
+        onCreateChannel={() => setIsCreateChannelOpen(true)}
         onSelectChat={handleSelectChat}
         onToggleTheme={toggleTheme}
         onOpenAddFriend={() => setIsAddFriendOpen(true)}
@@ -1118,6 +1228,13 @@ export const App: React.FC = () => {
           fetchFriends();
           fetchFriendRequests();
         }}
+      />
+
+      {/* 4b. Create Channel Dialog */}
+      <CreateChannelModal
+        isOpen={isCreateChannelOpen}
+        onClose={() => setIsCreateChannelOpen(false)}
+        onCreateChannel={handleCreateChannel}
       />
 
       {/* 5. Edit Message Modal */}

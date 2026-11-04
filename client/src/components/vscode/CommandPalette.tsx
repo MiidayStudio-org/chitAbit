@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { User, ActiveChat } from '../../types';
+import { User, ActiveChat, Channel } from '../../types';
+import { channelToChat } from '../../utils/chatUtils';
 import { Search, Sparkles, Hash, Moon, Sun, UserPlus, LogOut, X, Terminal, Settings, Palette, Check } from 'lucide-react';
 import { FileIcon, getFileExtension } from '../../utils/fileIcons';
 import { COLOR_THEMES, ColorThemeDefinition, getTheme } from '../../utils/themeRegistry';
@@ -8,6 +9,8 @@ export interface CommandPaletteProps {
   isOpen: boolean;
   onClose: () => void;
   friends: User[];
+  channels?: Channel[];
+  onCreateChannel?: () => void;
   onSelectChat: (chat: ActiveChat) => void;
   onToggleTheme: () => void;
   onOpenAddFriend: () => void;
@@ -37,6 +40,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   isOpen,
   onClose,
   friends,
+  channels,
+  onCreateChannel,
   onSelectChat,
   onToggleTheme,
   onOpenAddFriend,
@@ -90,21 +95,19 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     });
 
     // Chats & Files
-    list.push({
-      id: 'chat_general',
-      category: 'file',
-      title: 'general',
-      subtitle: 'channels > general',
-      fileIconName: 'folder',
-      onExecute: () => {
-        onSelectChat({
-          type: 'channel',
-          id: 'general',
-          name: 'general',
-          displayName: 'general',
-          fileIcon: 'folder',
-        });
-      },
+    const paletteChannels: Channel[] =
+      channels && channels.length > 0
+        ? channels
+        : [{ id: 'general', name: 'general', description: null, created_by: 'system', created_at: 0 }];
+    paletteChannels.forEach((channel) => {
+      list.push({
+        id: `chat_channel_${channel.id}`,
+        category: 'file',
+        title: channel.name,
+        subtitle: `channels > ${channel.description || channel.name}`,
+        fileIconName: 'folder',
+        onExecute: () => onSelectChat(channelToChat(channel)),
+      });
     });
 
     list.push({
@@ -158,6 +161,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       onExecute: onToggleTheme,
     });
 
+    if (onCreateChannel) {
+      list.push({
+        id: 'cmd_create_channel',
+        category: 'command',
+        title: 'ChitAbit: Create Channel',
+        subtitle: 'Start a new topic channel for everyone',
+        icon: <Hash className="w-4 h-4 text-[var(--accent)]" />,
+        onExecute: onCreateChannel,
+      });
+    }
+
     list.push({
       id: 'cmd_add_friend',
       category: 'command',
@@ -204,7 +218,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     });
 
     return list;
-  }, [friends, onSelectChat, onToggleTheme, onOpenAddFriend, onOpenSettings, onToggleSidebar, onCloseActiveTab, onLogout, isLightMode, currentColorTheme]);
+  }, [friends, channels, onCreateChannel, onSelectChat, onToggleTheme, onOpenAddFriend, onOpenSettings, onToggleSidebar, onCloseActiveTab, onLogout, isLightMode, currentColorTheme]);
 
   // Theme list for theme picker mode
   const themeItems: PaletteItem[] = useMemo(() => {

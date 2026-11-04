@@ -1,3 +1,4 @@
+import '../config/env.js'; // load .env before reading DB_PATH
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -6,15 +7,23 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Data directory at project root ./data
-const projectRoot = path.resolve(__dirname, '../../../');
-const dataDir = path.join(projectRoot, 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+// Where the database lives:
+// - tests (NODE_ENV=test): always in memory, so `npm test` never touches real chat history
+// - DB_PATH in .env if set
+// - otherwise: ./data/chat.db at the project root
+function resolveDbPath(): string {
+  if (process.env.NODE_ENV === 'test') return ':memory:';
+  const fromEnv = process.env.DB_PATH?.trim();
+  if (fromEnv) return fromEnv;
+
+  const dataDir = path.join(path.resolve(__dirname, '../../../'), 'data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+  return path.join(dataDir, 'chat.db');
 }
 
-const dbPath = path.join(dataDir, 'chat.db');
-export const db = new Database(dbPath);
+export const db = new Database(resolveDbPath());
 
 // Enable WAL mode for high concurrency
 db.pragma('journal_mode = WAL');
@@ -36,11 +45,11 @@ const safeAddColumn = (table: string, columnDef: string) => {
 
 safeAddColumn('users', 'password_hash TEXT');
 safeAddColumn('users', 'avatar_url TEXT');
-safeAddColumn('users', 'bio TEXT DEFAULT "Hey there! I am using chitAbit."');
-safeAddColumn('users', 'status TEXT DEFAULT "Online"');
-safeAddColumn('users', 'file_icon TEXT DEFAULT "ts"');
-safeAddColumn('users', 'message_language TEXT DEFAULT "typescript"');
-safeAddColumn('users', 'color_theme TEXT DEFAULT "dark-plus"');
+safeAddColumn('users', "bio TEXT DEFAULT 'Hey there! I am using chitAbit.'");
+safeAddColumn('users', "status TEXT DEFAULT 'Online'");
+safeAddColumn('users', "file_icon TEXT DEFAULT 'ts'");
+safeAddColumn('users', "message_language TEXT DEFAULT 'typescript'");
+safeAddColumn('users', "color_theme TEXT DEFAULT 'dark-plus'");
 safeAddColumn('users', 'custom_accent_color TEXT DEFAULT NULL');
 safeAddColumn('users', 'highlight_all_messages INTEGER DEFAULT 1');
 safeAddColumn('users', 'share_live_typing INTEGER DEFAULT 1');
@@ -51,28 +60,24 @@ safeAddColumn('messages', 'attachment_name TEXT');
 safeAddColumn('messages', 'attachment_size INTEGER');
 safeAddColumn('messages', 'read_at INTEGER');
 
-// Clean up any old mock/seeded users and non-general channels per user instructions
-try {
-  db.pragma('foreign_keys = OFF');
-  db.prepare(`
-    DELETE FROM users 
-    WHERE username IN ('bob_dev', 'charlie_fullstack', 'sarah_ops')
-       OR id LIKE 'user_bob%' 
-       OR id LIKE 'user_charlie%' 
-       OR id LIKE 'user_sarah%';
-  `).run();
-  db.pragma('foreign_keys = ON');
-} catch (err) {
-  console.error('[DB] Cleanup warning:', err);
-}
-
-// Seed the SINGLE group channel: #general
+// Seed the default channels (team spec). Users can create more.
 const now = Date.now();
-const insertGeneralChannel = db.prepare(`
+export const DEFAULT_CHANNELS: { id: string; description: string }[] = [
+  { id: 'general', description: 'General discussion for all chitAbit members' },
+  { id: 'javascript', description: 'JavaScript, TypeScript, Node.js and the web' },
+  { id: 'python', description: 'Python, scripting and data tooling' },
+  { id: 'devops', description: 'CI/CD, Docker, cloud and infrastructure' },
+  { id: 'ai-ml', description: 'AI, machine learning and LLMs' },
+  { id: 'help', description: 'Stuck on something? Ask here' },
+];
+const insertChannel = db.prepare(`
   INSERT OR IGNORE INTO channels (id, name, description, created_by, created_at)
-  VALUES ('general', 'general', 'General discussion for all chitAbit members', 'system', @createdAt)
+  VALUES (@id, @id, @description, 'system', @createdAt)
 `);
-insertGeneralChannel.run({ createdAt: now });
+db.transaction(() => {
+  // created_at + index keeps the default order stable in listings
+  DEFAULT_CHANNELS.forEach((ch, i) => insertChannel.run({ ...ch, createdAt: now + i }));
+})();
 
 // Seed DevBot User (the SINGLE chatbot)
 const insertDevBot = db.prepare(`
@@ -83,6 +88,13 @@ insertDevBot.run({ createdAt: now });
 
 // Update DevBot color to LINE green if it had another color
 db.prepare(`UPDATE users SET avatar_color = '#06C755', bio = 'Senior AI Pair Programmer & Debugger 🤖', status = 'Online' WHERE id = 'devbot';`).run();
+
+// "contains" pattern for LIKE ... ESCAPE '!'. Escapes % and _ so a search for
+// "50%" or "my_var" matches that literal text instead of acting as a wildcard.
+function likeContains(query: string): string {
+  const escaped = query.trim().toLowerCase().replace(/[!%_]/g, (c) => `!${c}`);
+  return `%${escaped}%`;
+}
 
 // DB Data Interfaces
 export interface UserRow {
@@ -195,6 +207,10 @@ export const dbService = {
     };
   },
 
+  setPasswordHash(id: string, passwordHash: string): void {
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, id);
+  },
+
   updateUserStatus(id: string, status?: string, bio?: string): UserRow | undefined {
     return this.updateUserProfile(id, { status, bio });
   },
@@ -240,13 +256,13 @@ export const dbService = {
   },
 
   searchUsers(query: string, excludeUserId?: string): UserRow[] {
-    const cleanQ = `%${query.trim().toLowerCase()}%`;
+    const cleanQ = likeContains(query);
     return db.prepare(`
       SELECT id, username, display_name, avatar_color, avatar_url, file_icon, message_language, color_theme, custom_accent_color, highlight_all_messages, share_live_typing, bio, status, is_bot, created_at
       FROM users
       WHERE is_bot = 0
         AND id != ?
-        AND (username LIKE ? OR display_name LIKE ?)
+        AND (username LIKE ? ESCAPE '!' OR display_name LIKE ? ESCAPE '!')
       ORDER BY username ASC
       LIMIT 20
     `).all(excludeUserId || '', cleanQ, cleanQ) as UserRow[];
@@ -321,47 +337,67 @@ export const dbService = {
       return { success: false, error: 'You are already friends' };
     }
 
-    // Check if reverse request exists
-    const reverse = db.prepare('SELECT * FROM friend_requests WHERE sender_id = ? AND receiver_id = ? AND status = "pending"').get(
-      receiverId,
-      senderId
-    ) as FriendRequestRow | undefined;
+    // Note: SQL string literals must use single quotes. better-sqlite3 treats
+    // "pending" as a column name and throws.
+
+    // The other person already sent me a request: accept it automatically
+    const reverse = db.prepare(
+      "SELECT * FROM friend_requests WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"
+    ).get(receiverId, senderId) as FriendRequestRow | undefined;
 
     if (reverse) {
-      // Auto-accept!
-      this.addFriend(senderId, receiverId);
-      db.prepare('UPDATE friend_requests SET status = "accepted" WHERE id = ?').run(reverse.id);
+      db.transaction(() => {
+        this.addFriend(senderId, receiverId);
+        db.prepare("UPDATE friend_requests SET status = 'accepted' WHERE id = ?").run(reverse.id);
+      })();
       return { success: true, autoAccepted: true };
     }
 
-    const id = `freq_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    // There is one row per (sender, receiver) because of the UNIQUE constraint.
+    // An old declined/accepted request (e.g. after unfriending) is reopened instead of blocking forever.
+    const existing = db.prepare(
+      'SELECT * FROM friend_requests WHERE sender_id = ? AND receiver_id = ?'
+    ).get(senderId, receiverId) as FriendRequestRow | undefined;
+
     const now = Date.now();
 
-    try {
-      db.prepare(`
-        INSERT INTO friend_requests (id, sender_id, receiver_id, status, created_at)
-        VALUES (?, ?, ?, 'pending', ?)
-      `).run(id, senderId, receiverId, now);
+    if (existing) {
+      if (existing.status === 'pending') {
+        return { success: false, error: 'A pending friend request already exists' };
+      }
+      db.prepare("UPDATE friend_requests SET status = 'pending', created_at = ? WHERE id = ?").run(now, existing.id);
       return { success: true };
-    } catch {
-      return { success: false, error: 'A pending friend request already exists' };
     }
+
+    const id = `freq_${now}_${Math.random().toString(36).slice(2, 7)}`;
+    db.prepare(
+      "INSERT INTO friend_requests (id, sender_id, receiver_id, status, created_at) VALUES (?, ?, ?, 'pending', ?)"
+    ).run(id, senderId, receiverId, now);
+    return { success: true };
   },
 
-  respondToFriendRequest(requestId: string, receiverId: string, action: 'accept' | 'decline'): { success: boolean; error?: string } {
-    const req = db.prepare('SELECT * FROM friend_requests WHERE id = ? AND receiver_id = ?').get(requestId, receiverId) as FriendRequestRow | undefined;
+  respondToFriendRequest(
+    requestId: string,
+    receiverId: string,
+    action: 'accept' | 'decline'
+  ): { success: boolean; error?: string; senderId?: string } {
+    const req = db.prepare(
+      "SELECT * FROM friend_requests WHERE id = ? AND receiver_id = ? AND status = 'pending'"
+    ).get(requestId, receiverId) as FriendRequestRow | undefined;
     if (!req) {
       return { success: false, error: 'Request not found' };
     }
 
     if (action === 'accept') {
-      this.addFriend(req.sender_id, req.receiver_id);
-      db.prepare('UPDATE friend_requests SET status = "accepted" WHERE id = ?').run(requestId);
+      db.transaction(() => {
+        this.addFriend(req.sender_id, req.receiver_id);
+        db.prepare("UPDATE friend_requests SET status = 'accepted' WHERE id = ?").run(requestId);
+      })();
     } else {
-      db.prepare('UPDATE friend_requests SET status = "declined" WHERE id = ?').run(requestId);
+      db.prepare("UPDATE friend_requests SET status = 'declined' WHERE id = ?").run(requestId);
     }
 
-    return { success: true };
+    return { success: true, senderId: req.sender_id };
   },
 
   // Channels
@@ -386,8 +422,13 @@ export const dbService = {
     return ch;
   },
 
+  // Default (system) channels first in their seeded order, then custom channels oldest first
   getChannels(): ChannelRow[] {
-    return [this.getGeneralChannel()];
+    this.getGeneralChannel(); // make sure #general always exists
+    return db.prepare(`
+      SELECT * FROM channels
+      ORDER BY (created_by = 'system') DESC, created_at ASC
+    `).all() as ChannelRow[];
   },
 
   getChannelById(id: string): ChannelRow | undefined {
@@ -398,6 +439,49 @@ export const dbService = {
   getChannelByName(name: string): ChannelRow | undefined {
     if (name.toLowerCase() === 'general') return this.getGeneralChannel();
     return db.prepare('SELECT * FROM channels WHERE name = ? COLLATE NOCASE').get(name) as ChannelRow | undefined;
+  },
+
+  // Unread tracking
+  // Channels: messages newer than the user's last read time (default: when the user joined).
+  // DMs: messages sent to the user that have no read_at yet.
+  markChannelRead(userId: string, channelId: string, at = Date.now()): void {
+    db.prepare(`
+      INSERT INTO channel_reads (user_id, channel_id, last_read_at) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, channel_id) DO UPDATE SET last_read_at = MAX(last_read_at, excluded.last_read_at)
+    `).run(userId, channelId, at);
+  },
+
+  // Keys match the client's unreadCounts map: channel id for channels, sender id for DMs.
+  getUnreadCounts(userId: string): Record<string, number> {
+    const counts: Record<string, number> = {};
+
+    const channelRows = db.prepare(`
+      SELECT m.channel_id AS chat_id, COUNT(*) AS count
+      FROM messages m
+      JOIN users me ON me.id = ?
+      LEFT JOIN channel_reads cr ON cr.user_id = me.id AND cr.channel_id = m.channel_id
+      WHERE m.channel_id IS NOT NULL
+        AND m.deleted_at IS NULL
+        AND m.sender_id != me.id
+        AND m.created_at > COALESCE(cr.last_read_at, me.created_at)
+      GROUP BY m.channel_id
+    `).all(userId) as { chat_id: string; count: number }[];
+
+    const dmRows = db.prepare(`
+      SELECT sender_id AS chat_id, COUNT(*) AS count
+      FROM messages
+      WHERE channel_id IS NULL
+        AND dm_recipient_id = ?
+        AND sender_id != ?
+        AND read_at IS NULL
+        AND deleted_at IS NULL
+      GROUP BY sender_id
+    `).all(userId, userId) as { chat_id: string; count: number }[];
+
+    for (const row of [...channelRows, ...dmRows]) {
+      counts[row.chat_id] = row.count;
+    }
+    return counts;
   },
 
   createChannel(id: string, name: string, description: string | null, createdBy: string): ChannelRow {
@@ -450,7 +534,7 @@ export const dbService = {
       SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon, u.message_language as sender_message_language, u.is_bot as sender_is_bot
       FROM messages m
       JOIN users u ON m.sender_id = u.id
-      WHERE m.channel_id = ?
+      WHERE m.channel_id = ? AND m.deleted_at IS NULL
     `;
     const params: any[] = [channelId];
 
@@ -481,7 +565,7 @@ export const dbService = {
       SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon, u.message_language as sender_message_language, u.is_bot as sender_is_bot
       FROM messages m
       JOIN users u ON m.sender_id = u.id
-      WHERE m.channel_id IS NULL AND (
+      WHERE m.channel_id IS NULL AND m.deleted_at IS NULL AND (
         (m.sender_id = ? AND m.dm_recipient_id = ?) OR
         (m.sender_id = ? AND m.dm_recipient_id = ?)
       )
@@ -632,7 +716,7 @@ export const dbService = {
       SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.is_bot as sender_is_bot
       FROM messages m
       JOIN users u ON m.sender_id = u.id
-      WHERE m.id = ?
+      WHERE m.id = ? AND m.deleted_at IS NULL
     `).get(id) as any;
 
     if (!row) return undefined;
@@ -657,7 +741,17 @@ export const dbService = {
     const msg = this.getMessageById(id);
     if (!msg || msg.sender_id !== senderId) return false;
 
-    db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+    // Soft delete: keep the row (with deleted_at) but wipe what it said.
+    // All read queries skip rows where deleted_at is set.
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE messages
+        SET deleted_at = ?, content = '', attachment_url = NULL, attachment_type = NULL,
+            attachment_name = NULL, attachment_size = NULL
+        WHERE id = ?
+      `).run(Date.now(), id);
+      db.prepare('DELETE FROM reactions WHERE message_id = ?').run(id);
+    })();
     return true;
   },
 
@@ -681,13 +775,14 @@ export const dbService = {
     return map.get(messageId) || [];
   },
 
-  searchMessages(query: string, channelId?: string, user1Id?: string, user2Id?: string): MessageWithReactions[] {
-    const cleanQ = `%${query.trim().toLowerCase()}%`;
+  // viewerId: only messages this user may see (any channel, or DMs they are part of)
+  searchMessages(query: string, viewerId: string, channelId?: string, user1Id?: string, user2Id?: string): MessageWithReactions[] {
+    const cleanQ = likeContains(query);
     let sql = `
       SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.is_bot as sender_is_bot
       FROM messages m
       JOIN users u ON m.sender_id = u.id
-      WHERE m.content LIKE ?
+      WHERE m.content LIKE ? ESCAPE '!' AND m.deleted_at IS NULL
     `;
     const params: any[] = [cleanQ];
 
@@ -701,6 +796,9 @@ export const dbService = {
       )`;
       params.push(user1Id, user2Id, user2Id, user1Id);
     }
+
+    sql += ` AND (m.channel_id IS NOT NULL OR m.sender_id = ? OR m.dm_recipient_id = ?)`;
+    params.push(viewerId, viewerId);
 
     sql += ` ORDER BY m.created_at DESC LIMIT 30`;
     const rows = db.prepare(sql).all(...params) as any[];

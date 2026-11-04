@@ -27,6 +27,7 @@ export function checkRateLimit(userId: string): { allowed: boolean; retryAfterMs
 export function resetRateLimit(userId: string) {
   userMessageTimestamps.delete(userId);
   userDraftTimestamps.delete(userId);
+  userBotTimestamps.delete(userId);
 }
 
 // In-memory rate limiter for draft updates (max 25 per 1 second window)
@@ -47,3 +48,45 @@ export function checkDraftRateLimit(userId: string): boolean {
   return true;
 }
 
+
+// Per-IP limiter for REST routes such as login/register (stops password guessing).
+export function createIpRateLimiter(options: { windowMs: number; max: number; message?: string }) {
+  const hits = new Map<string, number[]>();
+  return (req: { ip?: string; socket?: { remoteAddress?: string } }, res: any, next: () => void) => {
+    const key = req.ip || req.socket?.remoteAddress || 'unknown';
+    const now = Date.now();
+    const recent = (hits.get(key) || []).filter((t) => now - t < options.windowMs);
+    if (recent.length >= options.max) {
+      hits.set(key, recent);
+      const retryAfterSec = Math.ceil((options.windowMs - (now - recent[0])) / 1000);
+      res.setHeader('Retry-After', String(retryAfterSec));
+      res.status(429).json({ error: options.message || `Too many requests. Try again in ${retryAfterSec}s.` });
+      return;
+    }
+    recent.push(now);
+    hits.set(key, recent);
+    next();
+  };
+}
+
+// DevBot limit (Gemini calls cost quota). Default: 5 questions per minute per user.
+// Change with DEVBOT_MAX_PER_MINUTE in .env.
+const BOT_WINDOW_MS = 60 * 1000;
+const userBotTimestamps = new Map<string, number[]>();
+
+function getBotLimit(): number {
+  const n = Number(process.env.DEVBOT_MAX_PER_MINUTE);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+}
+
+export function checkBotRateLimit(userId: string): { allowed: boolean; retryAfterMs?: number } {
+  const now = Date.now();
+  const recent = (userBotTimestamps.get(userId) || []).filter((t) => now - t < BOT_WINDOW_MS);
+  if (recent.length >= getBotLimit()) {
+    userBotTimestamps.set(userId, recent);
+    return { allowed: false, retryAfterMs: BOT_WINDOW_MS - (now - recent[0]) };
+  }
+  recent.push(now);
+  userBotTimestamps.set(userId, recent);
+  return { allowed: true };
+}

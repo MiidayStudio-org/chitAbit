@@ -1,11 +1,5 @@
+import '../config/env.js'; // load .env (GEMINI_API_KEY, GEMINI_MODEL)
 import { GoogleGenAI } from '@google/genai';
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 const SYSTEM_INSTRUCTION = `You are DevBot, an elite senior software engineer and technical mentor built into this developer chat application.
 Your core principles:
@@ -57,7 +51,7 @@ export const botService = {
       ].filter(Boolean).join('\n');
 
       const responseStream = await ai.models.generateContentStream({
-        model: 'gemini-2.5-flash',
+        model: process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash',
         contents: fullPrompt,
         config: {
           systemInstruction: SYSTEM_INSTRUCTION,

@@ -1,30 +1,15 @@
 import { Router, Request, Response } from 'express';
-import jwt from 'jsonwebtoken';
 import { dbService } from '../db/index.js';
+import { requireAuth, authUserId } from '../middleware/auth.js';
+import { io } from '../index.js';
+import { toPublicUser } from '../utils/userDto.js';
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'chitabit_secret_jwt_key_2026';
 
-// Helper to extract userId from Auth Header or query
-function getUserId(req: Request): string | null {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
-      return decoded.userId;
-    } catch {
-      // ignore
-    }
-  }
-  if (req.query.userId && typeof req.query.userId === 'string') {
-    return req.query.userId;
-  }
-  if (req.body.userId && typeof req.body.userId === 'string') {
-    return req.body.userId;
-  }
-  return null;
-}
+// Every friends route needs a valid token. The user is ALWAYS taken from the token,
+// never from ?userId= or the body (that let anyone act as anyone).
+router.use(requireAuth);
+const getUserId = (req: Request): string => authUserId(req);
 
 // 1. Get confirmed friends list for current user
 router.get('/', (req: Request, res: Response): void => {
@@ -34,26 +19,15 @@ router.get('/', (req: Request, res: Response): void => {
     return;
   }
 
-  const friends = dbService.getFriends(userId).map((u) => ({
-    id: u.id,
-    username: u.username,
-    displayName: u.display_name,
-    avatarColor: u.avatar_color,
-    avatarUrl: u.avatar_url || null,
-    fileIcon: u.file_icon || 'ts',
-    bio: u.bio || 'Hey there! I am using chitAbit.',
-    status: u.status || 'Online',
-    isBot: Boolean(u.is_bot),
-    createdAt: u.created_at,
-  }));
+  const friends = dbService.getFriends(userId).map(toPublicUser);
 
   res.json({ friends });
 });
 
 // 2. Search users to add as friends
 router.get('/search', (req: Request, res: Response): void => {
-  const query = (req.query.q as string) || '';
-  const currentUserId = getUserId(req) || undefined;
+  const query = typeof req.query.q === 'string' ? req.query.q.slice(0, 50) : '';
+  const currentUserId = getUserId(req);
 
   if (!query.trim()) {
     res.json({ users: [] });
@@ -61,16 +35,8 @@ router.get('/search', (req: Request, res: Response): void => {
   }
 
   const matches = dbService.searchUsers(query, currentUserId).map((u) => ({
-    id: u.id,
-    username: u.username,
-    displayName: u.display_name,
-    avatarColor: u.avatar_color,
-    avatarUrl: u.avatar_url || null,
-    fileIcon: u.file_icon || 'ts',
-    bio: u.bio || 'Hey there! I am using chitAbit.',
-    status: u.status || 'Online',
-    isBot: false,
-    isFriend: currentUserId ? dbService.isFriend(currentUserId, u.id) : false,
+    ...toPublicUser(u),
+    isFriend: dbService.isFriend(currentUserId, u.id),
   }));
 
   res.json({ users: matches });
@@ -91,15 +57,15 @@ router.get('/requests', (req: Request, res: Response): void => {
 // 4. Send friend request (or add directly)
 router.post('/request', (req: Request, res: Response): void => {
   const senderId = getUserId(req);
-  const { targetUsername, targetUserId } = req.body;
+  const { targetUsername, targetUserId } = req.body ?? {};
 
   if (!senderId) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
 
-  let receiver = targetUserId ? dbService.getUserById(targetUserId) : null;
-  if (!receiver && targetUsername) {
+  let receiver = typeof targetUserId === 'string' ? dbService.getUserById(targetUserId) : undefined;
+  if (!receiver && typeof targetUsername === 'string') {
     const clean = targetUsername.trim().toLowerCase().replace(/^@/, '');
     receiver = dbService.getUserByUsername(clean);
   }
@@ -127,6 +93,14 @@ router.post('/request', (req: Request, res: Response): void => {
     return;
   }
 
+  // Live notification so the other person doesn't have to refresh
+  if (result.autoAccepted) {
+    io.to(`user:${receiver.id}`).emit('friend_request:accepted', { userId: senderId });
+    io.to(`user:${senderId}`).emit('friend_request:accepted', { userId: receiver.id });
+  } else {
+    io.to(`user:${receiver.id}`).emit('friend_request:received', { fromUserId: senderId });
+  }
+
   res.json({
     success: true,
     autoAccepted: Boolean(result.autoAccepted),
@@ -137,14 +111,14 @@ router.post('/request', (req: Request, res: Response): void => {
 // 5. Accept or decline friend request
 router.post('/respond', (req: Request, res: Response): void => {
   const userId = getUserId(req);
-  const { requestId, action } = req.body; // action: 'accept' | 'decline'
+  const { requestId, action } = req.body ?? {}; // action: 'accept' | 'decline'
 
   if (!userId) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
 
-  if (!requestId || !['accept', 'decline'].includes(action)) {
+  if (typeof requestId !== 'string' || !requestId || !['accept', 'decline'].includes(action)) {
     res.status(400).json({ error: 'Invalid requestId or action' });
     return;
   }
@@ -153,6 +127,11 @@ router.post('/respond', (req: Request, res: Response): void => {
   if (!result.success) {
     res.status(400).json({ error: result.error });
     return;
+  }
+
+  // Tell the person who sent the request (their friends list updates live)
+  if (action === 'accept' && result.senderId) {
+    io.to(`user:${result.senderId}`).emit('friend_request:accepted', { userId });
   }
 
   res.json({ success: true, action });

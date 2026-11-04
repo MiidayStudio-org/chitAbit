@@ -12,7 +12,7 @@ interface SocketContextType {
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
 
 export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user } = useAuth();
+  const { user, token, logout } = useAuth();
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
@@ -28,9 +28,22 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return;
     }
 
+    // Old sessions saved before tokens were required: make the user log in again
+    if (!token) {
+      logout();
+      return;
+    }
+
     const s = io('/', {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 10,
+      auth: { token },
+    });
+
+    s.on('connect_error', (err) => {
+      if (err.message === 'Unauthorized') {
+        logout();
+      }
     });
 
     s.on('connect', () => {
@@ -58,7 +71,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return () => {
       s.disconnect();
     };
-  }, [user?.id]);
+  }, [user?.id, token]);
 
   return (
     <SocketContext.Provider value={{ socket, isConnected, onlineUsers }}>
