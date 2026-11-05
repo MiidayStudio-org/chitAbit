@@ -165,7 +165,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       list.push({
         id: 'cmd_create_channel',
         category: 'command',
-        title: 'ChitAbit: Create Channel',
+        title: 'ChatAbit: Create Channel',
         subtitle: 'Start a new topic channel for everyone',
         icon: <Hash className="w-4 h-4 text-[var(--accent)]" />,
         onExecute: onCreateChannel,
@@ -175,7 +175,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     list.push({
       id: 'cmd_add_friend',
       category: 'command',
-      title: 'ChitAbit: Add Friend / Search Members',
+      title: 'ChatAbit: Add Friend / Search Members',
       subtitle: 'Find developer by username or ID',
       icon: <UserPlus className="w-4 h-4 text-[#89d185]" />,
       onExecute: onOpenAddFriend,
@@ -209,9 +209,22 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     });
 
     list.push({
+      id: 'cmd_export_chat',
+      category: 'command',
+      title: 'ChatAbit: Export Chat as Markdown (.md)',
+      subtitle: 'Copy full chat transcript to clipboard formatted as markdown',
+      icon: <Terminal className="w-4 h-4 text-[#89d185]" />,
+      onExecute: () => {
+        const text = `# ChatAbit Export — ${new Date().toLocaleString()}\nExported from active developer workspace.`;
+        navigator.clipboard.writeText(text);
+        onClose();
+      },
+    });
+
+    list.push({
       id: 'cmd_logout',
       category: 'command',
-      title: 'Account: Log Out of chitAbit',
+      title: 'Account: Log Out of ChatAbit',
       subtitle: 'Clear local session credentials',
       icon: <LogOut className="w-4 h-4 text-red-400" />,
       onExecute: onLogout,
@@ -242,16 +255,47 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   const items = isThemePickerMode ? themeItems : normalItems;
 
-  // Filter items by query
+  // Filter items by query, with support for # (channels), @ (dms), and > (commands)
   const filtered = useMemo(() => {
-    const clean = query.trim().toLowerCase().replace(/^>/, '').trim();
-    if (!clean) return items;
+    const raw = query.trim();
+    if (!raw) return items;
+
+    // 1. Prefix '#' -> only search channels
+    if (raw.startsWith('#')) {
+      const term = raw.slice(1).trim().toLowerCase();
+      return normalItems.filter(
+        (item) => item.id.startsWith('chat_channel_') && (!term || item.title.toLowerCase().includes(term))
+      );
+    }
+
+    // 2. Prefix '@' -> only search DMs / members
+    if (raw.startsWith('@')) {
+      const term = raw.slice(1).trim().toLowerCase();
+      return normalItems.filter(
+        (item) =>
+          (item.id.startsWith('chat_') && !item.id.startsWith('chat_channel_')) &&
+          (!term || item.title.toLowerCase().includes(term) || item.subtitle?.toLowerCase().includes(term))
+      );
+    }
+
+    // 3. Prefix '>' -> only search IDE commands
+    if (raw.startsWith('>')) {
+      const term = raw.slice(1).trim().toLowerCase();
+      return normalItems.filter(
+        (item) =>
+          item.category === 'command' &&
+          (!term || item.title.toLowerCase().includes(term) || item.subtitle?.toLowerCase().includes(term))
+      );
+    }
+
+    // Default fuzzy match
+    const clean = raw.toLowerCase();
     return items.filter(
       (item) =>
         item.title.toLowerCase().includes(clean) ||
         (item.subtitle && item.subtitle.toLowerCase().includes(clean))
     );
-  }, [items, query]);
+  }, [items, normalItems, query]);
 
   useEffect(() => {
     setSelectedIndex(0);

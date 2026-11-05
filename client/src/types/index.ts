@@ -88,6 +88,14 @@ export interface FriendRequest {
   receiver_avatar_color?: string;
 }
 
+export interface LinkPreview {
+  url: string;
+  title?: string;
+  description?: string;
+  image?: string;
+  siteName?: string;
+}
+
 export interface Message {
   id: string;
   channel_id: string | null;
@@ -113,6 +121,9 @@ export interface Message {
   created_at: number;
   reactions: ReactionGroup[];
   isStreaming?: boolean;
+  status?: 'pending' | 'delivered' | 'failed';
+  localTempId?: string;
+  linkPreview?: LinkPreview | null;
   reply_to?: {
     id: string;
     sender_username: string;
@@ -149,4 +160,49 @@ export interface ConversationItem {
   unreadCount?: number;
   lastMessage?: LastMessage;
   isPinned?: boolean;
+}
+
+export interface ChatAbitSettings {
+  // Chat & Messaging
+  'chat.sendOnEnter': boolean;
+  'chat.tabSize': number;
+  'chat.formatOnPaste': boolean;
+  'chat.inlineLinkPreviews': boolean;
+  'chat.liveTypingStream': boolean;
+
+  // Notifications & Sound
+  'notifications.level': 'all' | 'mentions' | 'none';
+  'notifications.desktop': boolean;
+  'notifications.mutedChannels': string[];
+  'sound.messageReceived': 'subtle-ping' | 'vscode-bell' | 'mechanical-click' | 'mute';
+  'sound.mentionReceived': 'distinct-tone' | 'mute';
+
+  // Appearance & Workbench
+  'workbench.colorTheme': string;
+  'workbench.customAccent': string | null;
+  'editor.fontLigatures': boolean;
+  'editor.fontSize': number;
+
+  // Privacy & Safety
+  'privacy.dmPolicy': 'everyone' | 'friends' | 'nobody';
+  'privacy.blockedUsers': string[];
+
+  // Profile / Git Identity
+  'profile.displayName': string;
+  'profile.bio': string;
+  'profile.status': string;
+  'profile.githubUsername': string;
+  'profile.gitBranch': string;
+  'profile.useAvatarUrl': boolean;
+  'profile.avatarUrl': string;
+  'profile.fileIcon': string;
+}
+
+export interface KeyboardShortcutItem {
+  id: string;
+  title: string;
+  command: string;
+  keybinding: string;
+  defaultKeybinding: string;
+  source: 'User' | 'Default';
 }

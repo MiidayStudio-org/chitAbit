@@ -77,6 +77,16 @@ router.get('/search', (req: Request, res: Response): void => {
   res.json({ messages });
 });
 
+// 3b. Catchup synchronization after reconnect
+router.get('/sync', (req: Request, res: Response): void => {
+  const since = Number(req.query.since) || 0;
+  const channelId = typeof req.query.channelId === 'string' ? req.query.channelId : undefined;
+  const dmUserId = typeof req.query.dmUserId === 'string' ? req.query.dmUserId : undefined;
+
+  const messages = dbService.getMessagesSince(authUserId(req), since, channelId, dmUserId);
+  res.json({ messages });
+});
+
 // 4. Edit your own message
 router.put('/:id', (req: Request, res: Response): void => {
   const { content } = req.body ?? {};

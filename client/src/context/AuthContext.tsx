@@ -13,7 +13,7 @@ interface AuthContextType {
     bio?: string;
     status?: string;
     avatarColor?: string;
-    avatarUrl?: string;
+    avatarUrl?: string | null;
     fileIcon?: string;
     messageLanguage?: string;
     colorTheme?: string;
@@ -131,7 +131,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     bio?: string;
     status?: string;
     avatarColor?: string;
-    avatarUrl?: string;
+    avatarUrl?: string | null;
     fileIcon?: string;
     messageLanguage?: string;
     colorTheme?: string;

@@ -6,6 +6,7 @@ import { CreateChannelModal } from './components/modals/CreateChannelModal';
 import { channelToChat } from './utils/chatUtils';
 import { ActivityBar } from './components/vscode/ActivityBar';
 import { ExplorerSidebar } from './components/vscode/ExplorerSidebar';
+import { SearchSidebar } from './components/vscode/SearchSidebar';
 import { EditorTabsBar } from './components/vscode/EditorTabsBar';
 import { BreadcrumbBar } from './components/vscode/BreadcrumbBar';
 import { EditorMessageFeed } from './components/vscode/EditorMessageFeed';
@@ -16,8 +17,19 @@ import { SettingsEditor } from './components/vscode/SettingsEditor';
 import { AddFriendDialog } from './components/vscode/AddFriendDialog';
 import { EditMessageModal } from './components/chat/EditMessageModal';
 import { LoginModal } from './components/modals/LoginModal';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { BottomPanel } from './components/vscode/BottomPanel';
+import { DevBotComingSoon } from './components/vscode/DevBotComingSoon';
+import { InviteToast } from './components/vscode/InviteToast';
+import { UserProfileModal, ProfileModalUser } from './components/vscode/UserProfileModal';
+import { FileIcon } from './utils/fileIcons';
+import { AlertCircle, Loader2, X, Terminal } from 'lucide-react';
 import { applyTheme } from './utils/themeRegistry';
+import {
+  playIncomingChime,
+  playMentionChime,
+  sendDesktopNotification,
+  requestNotificationPermission,
+} from './utils/notifications';
 
 const DEFAULT_TABS: OpenTab[] = [
   {
@@ -26,14 +38,6 @@ const DEFAULT_TABS: OpenTab[] = [
     displayName: 'general',
     type: 'channel',
     fileIcon: 'folder',
-  },
-  {
-    id: 'devbot',
-    name: 'devbot',
-    displayName: 'devbot.ai',
-    type: 'dm',
-    fileIcon: 'bot',
-    isBot: true,
   },
 ];
 
@@ -67,6 +71,15 @@ export const App: React.FC = () => {
   const [isCreateChannelOpen, setIsCreateChannelOpen] = useState(false);
   const [, setLastMessages] = useState<Record<string, LastMessage>>({});
 
+  // Bottom Panel & Terminal State
+  const [isBottomPanelOpen, setIsBottomPanelOpen] = useState<boolean>(true);
+
+  // Split Editor State
+  const [splitTabId, setSplitTabId] = useState<string | null>(null);
+  const [splitMessages, setSplitMessages] = useState<Message[]>([]);
+  const [splitHasMoreOlderMessages, setSplitHasMoreOlderMessages] = useState<boolean>(false);
+  const [splitReplyingTo, setSplitReplyingTo] = useState<Message | null>(null);
+
   // Chat Feed State
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasMoreOlderMessages, setHasMoreOlderMessages] = useState(false);
@@ -80,6 +93,19 @@ export const App: React.FC = () => {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [editingMessage, setEditingMessage] = useState<{ id: string; content: string } | null>(null);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null);
+  const [profileModalUser, setProfileModalUser] = useState<ProfileModalUser | null>(null);
+
+  const handleOpenUserProfile = useCallback((targetUser: ProfileModalUser) => {
+    setProfileModalUser(targetUser);
+  }, []);
+
+  // Request desktop notification permission on mount
+  useEffect(() => {
+    if (user) {
+      requestNotificationPermission().catch(() => {});
+    }
+  }, [user]);
 
   // Sync user profile theme preferences
   useEffect(() => {
@@ -165,6 +191,23 @@ export const App: React.FC = () => {
     };
   }, [activeTab]);
 
+  // Compute Split Chat from splitTabId
+  const splitTab = useMemo(() => {
+    return openTabs.find((t) => t.id === splitTabId) || null;
+  }, [openTabs, splitTabId]);
+
+  const splitChat: ActiveChat | null = useMemo(() => {
+    if (!splitTab || splitTab.type === 'settings') return null;
+    return {
+      type: splitTab.type,
+      id: splitTab.id,
+      name: splitTab.name,
+      displayName: splitTab.displayName,
+      fileIcon: splitTab.fileIcon,
+      isBot: splitTab.isBot,
+    };
+  }, [splitTab]);
+
   // Total unreads
   const totalUnreads = useMemo(() => {
     return Object.values(unreadCounts).reduce((acc, count) => acc + count, 0);
@@ -194,13 +237,15 @@ export const App: React.FC = () => {
     }
   }, [user]);
 
-  // Fetch all channels (6 defaults + custom ones)
+  // Fetch all channels
   const fetchChannels = useCallback(async () => {
     if (!user) return;
     try {
       const res = await fetch('/api/channels');
       const data = await res.json();
-      if (Array.isArray(data.channels)) setChannels(data.channels);
+      if (Array.isArray(data.channels)) {
+        setChannels(data.channels);
+      }
     } catch (err) {
       console.error('Failed to load channels:', err);
     }
@@ -232,18 +277,41 @@ export const App: React.FC = () => {
     }
   }, [user, fetchFriends, fetchFriendRequests, fetchChannels, fetchUnreadCounts]);
 
-  // After a reconnect we may have missed messages: resync channels and badges
+  // After a reconnect we may have missed messages: resync channels, badges, and catchup active chat messages
   useEffect(() => {
     if (!socket) return;
-    const resync = () => {
+    const resync = async () => {
       fetchChannels();
       fetchUnreadCounts();
+
+      if (activeChat && messages.length > 0) {
+        const lastTimestamp = Math.max(...messages.map((m) => m.created_at || 0));
+        try {
+          let url = `/api/messages/sync?since=${lastTimestamp}`;
+          if (activeChat.type === 'channel') {
+            url += `&channelId=${activeChat.id}`;
+          } else {
+            url += `&dmUserId=${activeChat.id}`;
+          }
+          const res = await fetch(url);
+          const data = await res.json();
+          if (Array.isArray(data.messages) && data.messages.length > 0) {
+            setMessages((prev) => {
+              const existingIds = new Set(prev.map((m) => m.id));
+              const newMsgs = data.messages.filter((m: Message) => !existingIds.has(m.id));
+              return [...prev, ...newMsgs];
+            });
+          }
+        } catch (err) {
+          console.error('Catchup sync error:', err);
+        }
+      }
     };
     socket.on('connect', resync);
     return () => {
       socket.off('connect', resync);
     };
-  }, [socket, fetchChannels, fetchUnreadCounts]);
+  }, [socket, activeChat, messages, fetchChannels, fetchUnreadCounts]);
 
   // Create a channel on the server, then open it
   const handleCreateChannel = useCallback(
@@ -270,11 +338,12 @@ export const App: React.FC = () => {
     []
   );
 
-  // Tab management handlers
+  // Tab management handlers: switch active conversation without indefinitely spawning new tabs
   const handleSelectChat = useCallback((chat: ActiveChat) => {
     setOpenTabs((prev) => {
       const exists = prev.find((t) => t.id === chat.id);
       if (exists) return prev;
+
       const newTab: OpenTab = {
         id: chat.id,
         name: chat.name,
@@ -283,10 +352,40 @@ export const App: React.FC = () => {
         fileIcon: chat.fileIcon,
         isBot: chat.isBot,
       };
-      return [...prev, newTab];
+
+      // Retain explicitly pinned conversations (devbot.ai, settings, or current split pane)
+      const pinnedTabs = prev.filter(
+        (t) => t.id === 'devbot' || t.id === 'settings' || (splitTabId && t.id === splitTabId)
+      );
+
+      return [...pinnedTabs, newTab];
     });
     setActiveTabId(chat.id);
-  }, []);
+  }, [splitTabId]);
+
+  const handleJumpToMessage = useCallback(
+    (chat: ActiveChat, messageId: string) => {
+      handleSelectChat(chat);
+      setHighlightMessageId(messageId);
+      setTimeout(() => {
+        setHighlightMessageId(null);
+      }, 4000);
+    },
+    [handleSelectChat]
+  );
+
+  const handleMessageUser = useCallback(
+    (userId: string, username: string) => {
+      handleSelectChat({
+        type: 'dm',
+        id: userId,
+        name: username,
+        displayName: `@${username}`,
+        fileIcon: 'ts',
+      });
+    },
+    [handleSelectChat]
+  );
 
   const handleOpenSettingsTab = useCallback(() => {
     setOpenTabs((prev) => {
@@ -305,6 +404,9 @@ export const App: React.FC = () => {
   }, []);
 
   const handleCloseTab = useCallback((tabId: string) => {
+    if (tabId === splitTabId) {
+      setSplitTabId(null);
+    }
     setOpenTabs((prev) => {
       const index = prev.findIndex((t) => t.id === tabId);
       if (index === -1) return prev;
@@ -321,7 +423,35 @@ export const App: React.FC = () => {
       }
       return nextTabs;
     });
-  }, [activeTabId]);
+  }, [activeTabId, splitTabId]);
+
+  const handleToggleSplit = useCallback(() => {
+    setSplitTabId((prev) => {
+      if (prev) return null;
+      const otherTab = openTabs.find((t) => t.id !== activeTabId && t.type !== 'settings');
+      if (otherTab) return otherTab.id;
+      return activeTabId === 'devbot' ? 'general' : 'devbot';
+    });
+  }, [openTabs, activeTabId]);
+
+  const handleOpenSplitWithChat = useCallback((chat: ActiveChat) => {
+    setOpenTabs((prev) => {
+      const exists = prev.find((t) => t.id === chat.id);
+      if (exists) return prev;
+      return [
+        ...prev,
+        {
+          id: chat.id,
+          name: chat.name,
+          displayName: chat.displayName || chat.name,
+          type: chat.type,
+          fileIcon: chat.fileIcon,
+          isBot: chat.isBot,
+        },
+      ];
+    });
+    setSplitTabId(chat.id);
+  }, []);
 
   const handleNextTab = useCallback(() => {
     setOpenTabs((prev) => {
@@ -343,7 +473,29 @@ export const App: React.FC = () => {
         return;
       }
 
-      // 2. Close Active Tab: Ctrl+W
+      // 1b. Search: Ctrl+Shift+F
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setNavTab('search');
+        setIsSidebarVisible(true);
+        return;
+      }
+
+      // 2. Toggle Bottom Terminal & Channels Panel: Ctrl+` or Ctrl+~ or Ctrl+J
+      if ((e.ctrlKey || e.metaKey) && (e.key === '`' || e.key === '~' || e.key.toLowerCase() === 'j')) {
+        e.preventDefault();
+        setIsBottomPanelOpen((prev) => !prev);
+        return;
+      }
+
+      // 3. Split Editor: Ctrl+\
+      if ((e.ctrlKey || e.metaKey) && e.key === '\\') {
+        e.preventDefault();
+        handleToggleSplit();
+        return;
+      }
+
+      // 4. Close Active Tab: Ctrl+W
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
         e.preventDefault();
         if (activeTabId) {
@@ -384,7 +536,7 @@ export const App: React.FC = () => {
 
   // Fetch messages when activeChat changes
   const fetchMessages = useCallback(async () => {
-    if (!user || !activeChat) {
+    if (!user || !activeChat || activeChat.id === 'devbot') {
       setMessages([]);
       return;
     }
@@ -447,6 +599,38 @@ export const App: React.FC = () => {
   useEffect(() => {
     fetchMessages();
   }, [fetchMessages]);
+
+  // Fetch messages when splitChat changes
+  const fetchSplitMessages = useCallback(async () => {
+    if (!user || !splitChat || splitChat.id === 'devbot') {
+      setSplitMessages([]);
+      return;
+    }
+
+    try {
+      if (splitChat.type === 'channel') {
+        const res = await fetch(`/api/channels/${splitChat.id}/messages?limit=40`);
+        const data = await res.json();
+        const msgList = data.messages || [];
+        setSplitMessages(msgList);
+        setSplitHasMoreOlderMessages(msgList.length >= 40);
+        setUnreadCounts((prev) => ({ ...prev, [splitChat.id]: 0 }));
+      } else if (splitChat.type === 'dm') {
+        const res = await fetch(`/api/messages/dm/${user.id}/${splitChat.id}?limit=40`);
+        const data = await res.json();
+        const msgList = data.messages || [];
+        setSplitMessages(msgList);
+        setSplitHasMoreOlderMessages(msgList.length >= 40);
+        setUnreadCounts((prev) => ({ ...prev, [splitChat.id]: 0 }));
+      }
+    } catch (err) {
+      console.error('Failed to load split messages:', err);
+    }
+  }, [user, splitChat]);
+
+  useEffect(() => {
+    fetchSplitMessages();
+  }, [fetchSplitMessages]);
 
   // Tell the server which chat is open (live drafts, and unread tracking:
   // messages in the open chat are not counted as unread)
@@ -538,7 +722,19 @@ export const App: React.FC = () => {
       if (isForCurrentChannel || isForCurrentDM) {
         setMessages((prev) => {
           if (prev.some((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
+
+          // Reconcile optimistic pending message if sent by me
+          if (msg.sender_id === user.id) {
+            const pendingIdx = prev.findIndex(
+              (m) => (m.status === 'pending' || m.id.startsWith('temp_')) && m.content === msg.content
+            );
+            if (pendingIdx !== -1) {
+              const updated = [...prev];
+              updated[pendingIdx] = { ...msg, status: 'delivered' };
+              return updated;
+            }
+          }
+          return [...prev, { ...msg, status: 'delivered' }];
         });
 
         // Mark read immediately if viewing this DM
@@ -556,6 +752,39 @@ export const App: React.FC = () => {
             ...prev,
             [key]: (prev[key] || 0) + 1,
           }));
+        }
+      }
+
+      // Audio notification and desktop push
+      if (msg.sender_id !== user.id) {
+        const isMentioned =
+          msg.content.includes(`@${user.username}`) ||
+          (user.displayName && msg.content.includes(`@${user.displayName}`));
+        if (isMentioned) {
+          playMentionChime();
+          sendDesktopNotification(`@${msg.sender_username} mentioned you`, msg.content);
+        } else {
+          playIncomingChime();
+          if (document.hidden) {
+            sendDesktopNotification(msg.sender_username, msg.content);
+          }
+        }
+      }
+
+      // Update split view messages if open
+      if (splitChat) {
+        const isForSplitChannel =
+          splitChat.type === 'channel' && msg.channel_id === splitChat.id;
+        const isForSplitDM =
+          splitChat.type === 'dm' &&
+          (msg.sender_id === splitChat.id ||
+            (msg.sender_id === user.id && msg.dm_recipient_id === splitChat.id));
+
+        if (isForSplitChannel || isForSplitDM) {
+          setSplitMessages((prev) => {
+            if (prev.some((m) => m.id === msg.id)) return prev;
+            return [...prev, msg];
+          });
         }
       }
 
@@ -665,16 +894,21 @@ export const App: React.FC = () => {
     // 7. Message Edited
     const handleMessageEdited = (updatedMsg: Message) => {
       setMessages((prev) => prev.map((m) => (m.id === updatedMsg.id ? updatedMsg : m)));
+      setSplitMessages((prev) => prev.map((m) => (m.id === updatedMsg.id ? updatedMsg : m)));
     };
 
     // 8. Message Deleted
     const handleMessageDeleted = (data: { id: string }) => {
       setMessages((prev) => prev.filter((m) => m.id !== data.id));
+      setSplitMessages((prev) => prev.filter((m) => m.id !== data.id));
     };
 
     // 9. Reaction Updated
     const handleReactionUpdated = (data: { messageId: string; reactions: any[] }) => {
       setMessages((prev) =>
+        prev.map((m) => (m.id === data.messageId ? { ...m, reactions: data.reactions } : m))
+      );
+      setSplitMessages((prev) =>
         prev.map((m) => (m.id === data.messageId ? { ...m, reactions: data.reactions } : m))
       );
     };
@@ -855,12 +1089,44 @@ export const App: React.FC = () => {
     }
   };
 
-  // Message sending
+  // Message sending with Optimistic UI & Lifecycle states
   const handleSendMessage = (
     content: string,
     attachment?: { url: string; type: string; name: string; size: number }
   ) => {
-    if (!socket || !user || !activeChat) return;
+    if (!user || !activeChat) return;
+
+    const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const isConnected = Boolean(socket?.connected);
+
+    const optimisticMsg: Message = {
+      id: tempId,
+      channel_id: activeChat.type === 'channel' ? activeChat.id : null,
+      dm_recipient_id: activeChat.type === 'dm' ? activeChat.id : null,
+      sender_id: user.id,
+      sender_username: user.username,
+      sender_display_name: user.displayName || user.username,
+      sender_avatar_color: user.avatarColor,
+      sender_avatar_url: user.avatarUrl,
+      sender_file_icon: user.fileIcon || 'ts',
+      sender_message_language: user.messageLanguage || 'typescript',
+      message_language: user.messageLanguage || 'typescript',
+      content,
+      attachment_url: attachment?.url || null,
+      attachment_type: attachment?.type || null,
+      attachment_name: attachment?.name || null,
+      attachment_size: attachment?.size || null,
+      created_at: Date.now(),
+      edited_at: null,
+      deleted_at: null,
+      reactions: [],
+      status: isConnected ? 'pending' : 'failed',
+      localTempId: tempId,
+    };
+
+    setMessages((prev) => [...prev, optimisticMsg]);
+
+    if (!isConnected || !socket) return;
 
     socket.emit('message:send', {
       channelId: activeChat.type === 'channel' ? activeChat.id : null,
@@ -874,8 +1140,39 @@ export const App: React.FC = () => {
       attachmentType: attachment?.type || null,
       attachmentName: attachment?.name || null,
       attachmentSize: attachment?.size || null,
+      localTempId: tempId,
     });
+
+    setTimeout(() => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId && m.status === 'pending' ? { ...m, status: 'failed' } : m))
+      );
+    }, 8000);
   };
+
+  const handleRetryMessage = useCallback(
+    (msg: Message) => {
+      if (!socket?.connected || !user) return;
+      setMessages((prev) =>
+        prev.map((m) => (m.id === msg.id ? { ...m, status: 'pending' } : m))
+      );
+      socket.emit('message:send', {
+        channelId: msg.channel_id,
+        dmRecipientId: msg.dm_recipient_id,
+        content: msg.content,
+        senderId: user.id,
+        senderUsername: user.username,
+        senderFileIcon: user.fileIcon || 'ts',
+        messageLanguage: user.messageLanguage || 'typescript',
+        attachmentUrl: msg.attachment_url,
+        attachmentType: msg.attachment_type,
+        attachmentName: msg.attachment_name,
+        attachmentSize: msg.attachment_size,
+        localTempId: msg.id,
+      });
+    },
+    [socket, user]
+  );
 
   const handleTyping = (isTyping: boolean) => {
     if (!socket || !user || !activeChat) return;
@@ -883,6 +1180,37 @@ export const App: React.FC = () => {
     socket.emit(event, {
       channelId: activeChat.type === 'channel' ? activeChat.id : undefined,
       dmRecipientId: activeChat.type === 'dm' ? activeChat.id : undefined,
+      username: user.username,
+    });
+  };
+
+  const handleSendSplitMessage = (
+    content: string,
+    attachment?: { url: string; type: string; name: string; size: number }
+  ) => {
+    if (!socket || !user || !splitChat) return;
+
+    socket.emit('message:send', {
+      channelId: splitChat.type === 'channel' ? splitChat.id : null,
+      dmRecipientId: splitChat.type === 'dm' ? splitChat.id : null,
+      content,
+      senderId: user.id,
+      senderUsername: user.username,
+      senderFileIcon: user.fileIcon || 'ts',
+      messageLanguage: user.messageLanguage || 'typescript',
+      attachmentUrl: attachment?.url || null,
+      attachmentType: attachment?.type || null,
+      attachmentName: attachment?.name || null,
+      attachmentSize: attachment?.size || null,
+    });
+  };
+
+  const handleSplitTyping = (isTyping: boolean) => {
+    if (!socket || !user || !splitChat) return;
+    const event = isTyping ? 'typing:start' : 'typing:stop';
+    socket.emit(event, {
+      channelId: splitChat.type === 'channel' ? splitChat.id : undefined,
+      dmRecipientId: splitChat.type === 'dm' ? splitChat.id : undefined,
       username: user.username,
     });
   };
@@ -979,7 +1307,7 @@ export const App: React.FC = () => {
       <div className="flex h-screen items-center justify-center bg-[#1e1e1e] text-[#cccccc] font-mono">
         <div className="flex items-center gap-3">
           <Loader2 className="w-5 h-5 animate-spin text-[#007acc]" />
-          <span className="text-xs">Loading chitAbit workspace...</span>
+          <span className="text-xs">Loading ChatAbit workspace...</span>
         </div>
       </div>
     );
@@ -1009,10 +1337,32 @@ export const App: React.FC = () => {
           unreadCount={totalUnreads}
           friendRequestsCount={friendRequests.length}
           onOpenSettingsTab={handleOpenSettingsTab}
+          onOpenProfile={() => user && handleOpenUserProfile(user)}
         />
 
-        {/* Primary Side Bar (Explorer / Friends / Search) */}
+        {/* Mobile backdrop for drawer sidebar */}
         {isSidebarVisible && (
+          <div
+            className="md:hidden fixed inset-0 left-12 bg-black/60 z-20 backdrop-blur-xs"
+            onClick={() => setIsSidebarVisible(false)}
+          />
+        )}
+
+        {/* Primary Side Bar (Search or Main/Friends Explorer) */}
+        {isSidebarVisible && navTab === 'search' && (
+          <SearchSidebar
+            channels={channels}
+            friends={friends}
+            onJumpToMessage={(chat, msgId) => {
+              handleJumpToMessage(chat, msgId);
+              if (window.innerWidth < 768) {
+                setIsSidebarVisible(false);
+              }
+            }}
+            onClose={() => setIsSidebarVisible(false)}
+          />
+        )}
+        {isSidebarVisible && navTab !== 'search' && (
           <ExplorerSidebar
             activeTab={navTab}
             currentUser={user}
@@ -1026,15 +1376,21 @@ export const App: React.FC = () => {
             typingChannelIds={typingChannelIdsSet}
             onCreateChannel={() => setIsCreateChannelOpen(true)}
             isBotTyping={isBotTyping}
-            onSelectChat={handleSelectChat}
+            onSelectChat={(chat) => {
+              handleSelectChat(chat);
+              if (window.innerWidth < 768) {
+                setIsSidebarVisible(false);
+              }
+            }}
             onOpenAddFriend={() => setIsAddFriendOpen(true)}
             onRespondFriendRequest={handleRespondFriendRequest}
             onRemoveFriend={handleRemoveFriend}
+            onOpenUserProfile={handleOpenUserProfile}
           />
         )}
 
         {/* Editor Main Canvas */}
-        <div className="flex-1 flex flex-col h-full overflow-hidden bg-[var(--bg)] relative">
+        <div className="flex-1 flex flex-col h-full overflow-hidden bg-[var(--bg)] relative min-w-0">
           {/* Rate limit warning banner */}
           {rateLimitNotice && (
             <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 bg-amber-500 text-slate-950 font-semibold px-4 py-1.5 rounded shadow-xl flex items-center gap-2 text-xs font-mono animate-bounce">
@@ -1050,64 +1406,180 @@ export const App: React.FC = () => {
             unreadCounts={unreadCounts}
             onSelectTab={(id) => setActiveTabId(id)}
             onCloseTab={handleCloseTab}
+            onToggleSplit={handleToggleSplit}
+            isSplitOpen={Boolean(splitTabId)}
+            onToggleBottomPanel={() => setIsBottomPanelOpen((prev) => !prev)}
+            isBottomPanelOpen={isBottomPanelOpen}
+            onToggleSidebar={() => setIsSidebarVisible((prev) => !prev)}
           />
-
-          {/* Breadcrumb Bar */}
-          <BreadcrumbBar activeChat={activeChat} />
 
           {/* Active Tab View */}
           <div className="flex-1 flex flex-col h-full overflow-hidden relative">
             {activeTab?.type === 'settings' ? (
               <SettingsEditor
                 currentUser={user}
+                channels={channels}
                 onUpdateProfile={updateProfile}
                 currentColorTheme={colorTheme}
                 onSelectTheme={handleSelectTheme}
                 customAccentColor={customAccentColor}
                 onSetCustomAccent={handleSetCustomAccent}
                 onLogout={logout}
+                onOpenProfile={handleOpenUserProfile}
               />
             ) : activeChat ? (
-              <>
-                <EditorMessageFeed
-                  activeChat={activeChat}
-                  messages={messages}
-                  currentUser={user}
-                  typingUsers={typingUsers}
-                  isBotTyping={isBotTyping}
-                  isLightMode={isLightMode}
-                  colorTheme={colorTheme}
-                  highlightAllMessages={user.highlightAllMessages !== false}
-                  liveDrafts={liveDrafts}
-                  shareLiveTyping={user.shareLiveTyping !== false}
-                  onEdit={(id, content) => setEditingMessage({ id, content })}
-                  onDelete={handleDeleteMessage}
-                  onToggleReaction={handleToggleReaction}
-                  onAskBot={(prompt) => handleSendMessage(`/ask ${prompt}`)}
-                  onReply={(msg) => setReplyingTo(msg)}
-                  onLoadOlderMessages={handleLoadOlderMessages}
-                  hasMoreOlderMessages={hasMoreOlderMessages}
-                />
+              <div className="flex-1 flex overflow-hidden relative">
+                {/* Primary Left Editor Group */}
+                <div className={`flex-1 flex flex-col h-full overflow-hidden ${splitChat ? 'border-r border-[var(--border)]' : ''}`}>
+                  <BreadcrumbBar
+                    activeChat={activeChat}
+                    channels={channels}
+                    friends={friends}
+                    onSelectChat={handleSelectChat}
+                  />
+                  {activeChat.id === 'devbot' ? (
+                    <DevBotComingSoon
+                      onBackToGeneral={() =>
+                        handleSelectChat({
+                          type: 'channel',
+                          id: 'general',
+                          name: 'general',
+                          displayName: 'general',
+                          fileIcon: 'folder',
+                        })
+                      }
+                    />
+                  ) : (
+                    <>
+                      <EditorMessageFeed
+                        activeChat={activeChat}
+                        messages={messages}
+                        currentUser={user}
+                        typingUsers={typingUsers}
+                        isBotTyping={isBotTyping && activeChat.id === 'devbot'}
+                        isLightMode={isLightMode}
+                        colorTheme={colorTheme}
+                        highlightAllMessages={user.highlightAllMessages !== false}
+                        liveDrafts={liveDrafts}
+                        shareLiveTyping={user.shareLiveTyping !== false}
+                        unreadCount={activeChat ? unreadCounts[activeChat.id] || 0 : 0}
+                        highlightMessageId={highlightMessageId}
+                        onEdit={(id, content) => setEditingMessage({ id, content })}
+                        onDelete={handleDeleteMessage}
+                        onToggleReaction={handleToggleReaction}
+                        onAskBot={(prompt) => handleSendMessage(`/ask ${prompt}`)}
+                        onReply={(msg) => setReplyingTo(msg)}
+                        onRetryMessage={handleRetryMessage}
+                        onLoadOlderMessages={handleLoadOlderMessages}
+                        hasMoreOlderMessages={hasMoreOlderMessages}
+                        onOpenUserProfile={handleOpenUserProfile}
+                      />
 
-                <EditorInputBar
-                  onSendMessage={handleSendMessage}
-                  onTyping={handleTyping}
-                  onUpdateDraft={handleUpdateDraft}
-                  onClearDraft={handleClearDraft}
-                  shareLiveTyping={user.shareLiveTyping !== false}
-                  targetId={activeChat.id}
-                  targetName={activeChat.displayName || activeChat.name}
-                  replyingTo={replyingTo}
-                  onCancelReply={() => setReplyingTo(null)}
-                  socketConnected={Boolean(socket?.connected)}
-                />
-              </>
+                      <EditorInputBar
+                        onSendMessage={handleSendMessage}
+                        onTyping={handleTyping}
+                        onUpdateDraft={handleUpdateDraft}
+                        onClearDraft={handleClearDraft}
+                        shareLiveTyping={user.shareLiveTyping !== false}
+                        targetId={activeChat.id}
+                        targetName={activeChat.displayName || activeChat.name}
+                        replyingTo={replyingTo}
+                        onCancelReply={() => setReplyingTo(null)}
+                        socketConnected={Boolean(socket?.connected)}
+                      />
+                    </>
+                  )}
+                </div>
+
+                {/* Secondary Right Editor Group (Split Editor View) */}
+                {splitChat && (
+                  <div className="flex-1 flex flex-col h-full overflow-hidden bg-[var(--bg)]">
+                    {/* Split Pane Title Strip */}
+                    <div className="h-7 px-3 bg-[var(--tab-inactive)] border-b border-[var(--border)] flex items-center justify-between text-[11px] font-mono select-none flex-shrink-0">
+                      <div className="flex items-center gap-1.5 text-[var(--text)]">
+                        <FileIcon
+                          name={splitChat.fileIcon}
+                          isFolder={splitChat.type === 'channel'}
+                          isOpenFolder={splitChat.type === 'channel'}
+                          isBot={splitChat.isBot}
+                          size={13}
+                        />
+                        <span className="font-semibold text-[#4fc1ff]">
+                          {splitChat.displayName || splitChat.name}
+                        </span>
+                        <span className="text-[10px] text-[#858585] ml-1">[Split View]</span>
+                      </div>
+                      <button
+                        type="button"
+                        title="Close Split Editor (Ctrl+\)"
+                        onClick={() => setSplitTabId(null)}
+                        className="p-1 rounded text-[#858585] hover:text-white hover:bg-[#3c3c3c] light-plus:hover:bg-[#e0e0e0] cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <BreadcrumbBar
+                      activeChat={splitChat}
+                      channels={channels}
+                      friends={friends}
+                      onSelectChat={handleOpenSplitWithChat}
+                    />
+                    {splitChat.id === 'devbot' ? (
+                      <DevBotComingSoon onBackToGeneral={() => setSplitTabId(null)} />
+                    ) : (
+                      <>
+                        <EditorMessageFeed
+                          activeChat={splitChat}
+                          messages={splitMessages}
+                          currentUser={user}
+                          typingUsers={typingUsers}
+                          isBotTyping={isBotTyping && splitChat.id === 'devbot'}
+                          isLightMode={isLightMode}
+                          colorTheme={colorTheme}
+                          highlightAllMessages={user.highlightAllMessages !== false}
+                          liveDrafts={liveDrafts}
+                          shareLiveTyping={user.shareLiveTyping !== false}
+                          unreadCount={splitChat ? unreadCounts[splitChat.id] || 0 : 0}
+                          onEdit={(id, content) => setEditingMessage({ id, content })}
+                          onDelete={handleDeleteMessage}
+                          onToggleReaction={handleToggleReaction}
+                          onAskBot={(prompt) => handleSendSplitMessage(`/ask ${prompt}`)}
+                          onReply={(msg) => setSplitReplyingTo(msg)}
+                          onRetryMessage={handleRetryMessage}
+                          onLoadOlderMessages={handleLoadOlderMessages}
+                          hasMoreOlderMessages={splitHasMoreOlderMessages}
+                          onOpenUserProfile={handleOpenUserProfile}
+                        />
+
+                        <EditorInputBar
+                          onSendMessage={handleSendSplitMessage}
+                          onTyping={handleSplitTyping}
+                          onUpdateDraft={handleUpdateDraft}
+                          onClearDraft={handleClearDraft}
+                          shareLiveTyping={user.shareLiveTyping !== false}
+                          targetId={splitChat.id}
+                          targetName={splitChat.displayName || splitChat.name}
+                          replyingTo={splitReplyingTo}
+                          onCancelReply={() => setSplitReplyingTo(null)}
+                          socketConnected={Boolean(socket?.connected)}
+                        />
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
             ) : (
               /* Empty Editor Watermark Screen */
               <div className="flex-1 flex flex-col items-center justify-center p-8 text-center select-none text-[#858585] font-mono">
                 <div className="max-w-md space-y-4">
-                  <div className="text-4xl opacity-20 font-bold tracking-tight text-white light-plus:text-black">
-                    chitAbit
+                  <div className="flex flex-col items-center justify-center gap-2">
+                    <div className="w-14 h-14 rounded-xl bg-[#252526] border border-[#3c3c3c] light-plus:bg-white light-plus:border-[#e0e0e0] flex items-center justify-center shadow-md">
+                      <Terminal className="w-8 h-8 text-[#007acc] stroke-[2.2]" />
+                    </div>
+                    <div className="text-3xl opacity-40 font-bold tracking-tight text-white light-plus:text-black">
+                      ChatAbit
+                    </div>
                   </div>
                   <p className="text-xs text-[#858585]">
                     Developer chat inside the VS Code editor workbench
@@ -1182,10 +1654,27 @@ export const App: React.FC = () => {
               </div>
             )}
           </div>
+
+          {/* Bottom Terminal & Channels Panel */}
+          <BottomPanel
+            isOpen={isBottomPanelOpen}
+            onClose={() => setIsBottomPanelOpen(false)}
+            channels={channels}
+            activeChat={activeChat}
+            unreadCounts={unreadCounts}
+            typingChannelIds={typingChannelIdsSet}
+            onSelectChat={handleSelectChat}
+            onCreateChannel={() => setIsCreateChannelOpen(true)}
+            onSendMessage={handleSendMessage}
+            currentUser={user}
+            socketConnected={Boolean(socket?.connected)}
+            friends={friends}
+            onOpenSplitWithChat={handleOpenSplitWithChat}
+          />
         </div>
       </div>
 
-      {/* 2. VS Code Status Bar (22px Blue Bar #007ACC) */}
+      {/* 2. VS Code Status Bar */}
       <StatusBar
         socketConnected={Boolean(socket?.connected)}
         currentUser={user}
@@ -1194,8 +1683,20 @@ export const App: React.FC = () => {
         isBotTyping={isBotTyping}
         onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
         onToggleTheme={toggleTheme}
+        onToggleBottomPanel={() => setIsBottomPanelOpen((prev) => !prev)}
+        channelCount={channels.length}
         isLightMode={isLightMode}
         currentColorTheme={colorTheme}
+        friendRequests={friendRequests}
+        onRespondFriendRequest={handleRespondFriendRequest}
+        onOpenSettings={handleOpenSettingsTab}
+        onOpenProfile={handleOpenUserProfile}
+      />
+
+      {/* Actionable Bottom-Right VS Code Notification Toast */}
+      <InviteToast
+        friendRequests={friendRequests}
+        onRespondFriendRequest={handleRespondFriendRequest}
       />
 
       {/* 3. Command Palette Dialog (Ctrl+Shift+P / Ctrl+P) */}
@@ -1247,6 +1748,16 @@ export const App: React.FC = () => {
           onClose={() => setEditingMessage(null)}
         />
       )}
+
+      {/* 6. Centered User Profile Modal */}
+      <UserProfileModal
+        isOpen={Boolean(profileModalUser)}
+        user={profileModalUser}
+        currentUserId={user?.id}
+        onClose={() => setProfileModalUser(null)}
+        onEditProfile={handleOpenSettingsTab}
+        onOpenMessage={handleMessageUser}
+      />
     </div>
   );
 };

@@ -11,6 +11,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import { Message } from '../../types';
+import { getStoredSettings } from '../../utils/settingsStore';
 
 export interface EditorInputBarProps {
   onSendMessage: (
@@ -62,6 +63,15 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
     isUploading: boolean;
   } | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [appSettings, setAppSettings] = useState(() => getStoredSettings());
+
+  useEffect(() => {
+    const handleSettingsChange = (e: any) => {
+      if (e.detail) setAppSettings(e.detail);
+    };
+    window.addEventListener('chatabit:settings_changed', handleSettingsChange);
+    return () => window.removeEventListener('chatabit:settings_changed', handleSettingsChange);
+  }, []);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -70,12 +80,13 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
   const idleClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastDraftSentTimeRef = useRef<number>(0);
   const hasActiveDraftRef = useRef<boolean>(false);
+  const lastTypingSentRef = useRef<number>(0);
 
   useEffect(() => {
     textareaRef.current?.focus();
   }, [targetName, replyingTo]);
 
-  // Clear draft on chat switch
+  // Restore draft or clear on chat switch
   useEffect(() => {
     if (hasActiveDraftRef.current) {
       onClearDraft?.();
@@ -89,7 +100,8 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
       clearTimeout(idleClearTimeoutRef.current);
       idleClearTimeoutRef.current = null;
     }
-    setText('');
+    const savedDraft = targetId ? localStorage.getItem(`chatabit_draft_${targetId}`) || '' : '';
+    setText(savedDraft);
   }, [targetId, onClearDraft]);
 
   // Resend current draft on socket reconnect
@@ -192,32 +204,129 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
       setShowCommands(false);
     }
 
-    onTyping(true);
+    // Persist draft locally
+    if (targetId) {
+      if (val.trim()) {
+        localStorage.setItem(`chatabit_draft_${targetId}`, val);
+      } else {
+        localStorage.removeItem(`chatabit_draft_${targetId}`);
+      }
+    }
+
+    // Throttled typing indicator: broadcast at most once every 2.5s, auto-expire after 4s
+    const now = Date.now();
+    if (now - lastTypingSentRef.current > 2500) {
+      onTyping(true);
+      lastTypingSentRef.current = now;
+    }
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = setTimeout(() => {
       onTyping(false);
+      lastTypingSentRef.current = 0;
     }, 4000);
 
     handleDraftEmit(val, e.target.selectionStart);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    const sendOnEnter = appSettings['chat.sendOnEnter'];
+
+    // Tab key indents code with configured tab size
+    if (e.key === 'Tab') {
       e.preventDefault();
-      submitMessage();
-    } else if (e.key === 'Escape') {
+      const tabSize = appSettings['chat.tabSize'] || 2;
+      const spaces = ' '.repeat(tabSize);
+      const start = textareaRef.current?.selectionStart || 0;
+      const end = textareaRef.current?.selectionEnd || 0;
+      const nextText = text.substring(0, start) + spaces + text.substring(end);
+      setText(nextText);
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + tabSize;
+        }
+      });
+      return;
+    }
+
+    if (sendOnEnter) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        submitMessage();
+      }
+    } else {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitMessage();
+      }
+    }
+
+    if (e.key === 'Escape') {
       if (showCommands) setShowCommands(false);
       else if (showEmojiPicker) setShowEmojiPicker(false);
       else if (replyingTo) onCancelReply?.();
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Client-side image compression
+  const compressImage = async (file: File): Promise<File | Blob> => {
+    if (!file.type.startsWith('image/') || file.type === 'image/gif') return file;
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const maxDimension = 1920;
+          let { width, height } = img;
+          if (width > maxDimension || height > maxDimension) {
+            if (width > height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return resolve(file);
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob(
+            (blob) => {
+              if (blob && blob.size < file.size) {
+                resolve(new window.File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }));
+              } else {
+                resolve(file);
+              }
+            },
+            'image/jpeg',
+            0.82
+          );
+        };
+        img.onerror = () => resolve(file);
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    });
+  };
 
-    if (file.size > 5 * 1024 * 1024) {
-      setUploadError('File exceeds 5MB size limit');
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const rawFile = e.target.files?.[0];
+    if (!rawFile) return;
+
+    // Validate against dangerous extensions
+    const DANGEROUS_EXTS = ['.exe', '.bat', '.cmd', '.sh', '.msi', '.dll', '.vbs', '.ps1', '.scr', '.pif'];
+    const ext = rawFile.name.slice(rawFile.name.lastIndexOf('.')).toLowerCase();
+    if (DANGEROUS_EXTS.includes(ext)) {
+      setUploadError(`Executable files (${ext}) are blocked for security.`);
+      e.target.value = '';
+      return;
+    }
+
+    if (rawFile.size > 25 * 1024 * 1024) {
+      setUploadError('File exceeds 25MB size limit');
       e.target.value = '';
       return;
     }
@@ -225,16 +334,17 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
     setUploadError(null);
     setPendingAttachment({
       url: '',
-      type: file.type,
-      name: file.name,
-      size: file.size,
+      type: rawFile.type,
+      name: rawFile.name,
+      size: rawFile.size,
       isUploading: true,
     });
 
-    const formData = new FormData();
-    formData.append('file', file);
-
     try {
+      const fileToUpload = await compressImage(rawFile);
+      const formData = new FormData();
+      formData.append('file', fileToUpload, rawFile.name);
+
       const res = await fetch('/api/upload', {
         method: 'POST',
         body: formData,
@@ -248,7 +358,7 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
         setPendingAttachment({
           url: data.url,
           type: data.mimetype,
-          name: data.filename,
+          name: data.filename || rawFile.name,
           size: data.size,
           isUploading: false,
         });
@@ -298,6 +408,10 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
       : undefined;
 
     onSendMessage(finalContent, attachmentPayload);
+
+    if (targetId) {
+      localStorage.removeItem(`chatabit_draft_${targetId}`);
+    }
 
     setText('');
     setPendingAttachment(null);
@@ -457,7 +571,11 @@ export const EditorInputBar: React.FC<EditorInputBarProps> = ({
             value={text}
             onChange={handleTextChange}
             onKeyDown={handleKeyDown}
-            placeholder={`Type a message into ${targetName}... (/ for commands, Shift+Enter for newline)`}
+            placeholder={`Type a message into ${targetName}... (${
+              appSettings['chat.sendOnEnter']
+                ? '/ for commands, Shift+Enter for newline'
+                : 'Ctrl+Enter to send, Enter for newline'
+            })`}
             className="w-full bg-transparent px-3 py-2 text-[13px] text-[var(--text)] placeholder-[var(--muted)] outline-none resize-none leading-relaxed font-mono max-h-36"
           />
 

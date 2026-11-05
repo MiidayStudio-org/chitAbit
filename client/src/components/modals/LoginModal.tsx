@@ -54,7 +54,7 @@ export const LoginModal: React.FC = () => {
             <span className="w-2.5 h-2.5 rounded-full bg-[#f88070] inline-block" />
             <span className="w-2.5 h-2.5 rounded-full bg-[#cca700] inline-block" />
             <span className="w-2.5 h-2.5 rounded-full bg-[#89d185] inline-block" />
-            <span className="ml-2 font-semibold text-[#858585]">chitAbit — Authentication</span>
+            <span className="ml-2 font-semibold text-[#858585]">ChatAbit — Authentication</span>
           </div>
           <FileIcon name="ts" size={14} />
         </div>
@@ -65,7 +65,7 @@ export const LoginModal: React.FC = () => {
             <div className="inline-flex p-3 rounded-lg bg-[#252526] border border-[#3c3c3c] mb-2 text-[#007acc]">
               <Terminal className="w-7 h-7" />
             </div>
-            <h1 className="text-lg font-bold text-white tracking-tight">chitAbit</h1>
+            <h1 className="text-lg font-bold text-white tracking-tight">ChatAbit</h1>
             <p className="text-xs text-[#858585] mt-0.5">Developer Chat in VS Code</p>
           </div>
 

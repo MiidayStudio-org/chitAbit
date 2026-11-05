@@ -20,7 +20,7 @@ const PASSWORD_MAX = 72; // bcrypt only uses the first 72 bytes
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 const SAFE_TOKEN = /^[\w.+#-]{1,40}$/;
-const UPLOAD_URL = /^\/uploads\/[\w.-]+$/;
+const UPLOAD_URL = /^(\/uploads\/[\w.-]+|https:\/\/[a-zA-Z0-9_\-\.\/]+|data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+)$/;
 
 const AVATAR_COLORS = [
   '#06c755', // LINE green

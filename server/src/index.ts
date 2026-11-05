@@ -13,6 +13,7 @@ import messagesRoutes from './routes/messages.js';
 import usersRoutes from './routes/users.js';
 import friendsRoutes from './routes/friends.js';
 import uploadRoutes from './routes/upload.js';
+import mediaRoutes from './routes/media.js';
 import { registerChatHandlers } from './sockets/chatHandler.js';
 import { getJwtSecret } from './middleware/auth.js';
 
@@ -79,6 +80,7 @@ app.use('/api/messages', messagesRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/friends', friendsRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/media', mediaRoutes);
 
 // Status / Health Check
 app.get('/api/health', (_req, res) => {
@@ -97,7 +99,7 @@ const PORT = process.env.PORT || 3001;
 // Only listen if not imported by tests
 if (process.env.NODE_ENV !== 'test') {
   server.listen(PORT, () => {
-    console.log(`[Server] chitAbit backend running on http://localhost:${PORT}`);
+    console.log(`[Server] ChatAbit backend running on http://localhost:${PORT}`);
     console.log(`[Server] DevBot status: ${process.env.GEMINI_API_KEY ? 'Live Gemini AI' : 'Demo Mode (No API key found)'}`);
   });
 }

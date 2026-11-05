@@ -25,9 +25,9 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
     >
       {/* Top: Brand Logo + Primary Tabs */}
       <div className="flex flex-col items-center w-full gap-6">
-        {/* chitAbit LINE Brand Icon */}
+        {/* ChatAbit LINE Brand Icon */}
         <div
-          title="chitAbit LINE"
+          title="ChatAbit LINE"
           onClick={() => onSelectTab('home')}
           className="w-10 h-10 rounded-2xl bg-[#06C755] flex items-center justify-center text-white shadow-md shadow-[#06C755]/30 cursor-pointer transition-transform hover:scale-105 active:scale-95"
         >

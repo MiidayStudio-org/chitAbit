@@ -29,7 +29,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
       <div className="px-6 py-5 border-b border-zinc-100 dark:border-zinc-800/80 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-zinc-900 dark:text-white">Home</h1>
-          <p className="text-xs text-zinc-400 mt-0.5">Welcome back to chitAbit</p>
+          <p className="text-xs text-zinc-400 mt-0.5">Welcome back to ChatAbit</p>
         </div>
         <button
           type="button"
@@ -70,7 +70,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
               <span className="text-xs font-medium text-zinc-400">@{currentUser?.username}</span>
             </div>
             <p className="text-sm text-zinc-600 dark:text-zinc-300 mt-1 italic">
-              "{currentUser?.bio || 'Building amazing things on chitAbit 🚀'}"
+              "{currentUser?.bio || 'Building amazing things on ChatAbit 🚀'}"
             </p>
             <div className="mt-3 flex items-center justify-center sm:justify-start gap-2">
               <button
@@ -237,7 +237,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   id: 'general',
                   name: 'general',
                   displayName: '#general',
-                  description: 'General discussion for all chitAbit members',
+                  description: 'General discussion for all ChatAbit members',
                 })
               }
               className="mt-4 flex items-center justify-between w-full px-4 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-white text-xs font-semibold transition-all cursor-pointer shadow-sm"

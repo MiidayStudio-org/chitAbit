@@ -45,7 +45,7 @@ const safeAddColumn = (table: string, columnDef: string) => {
 
 safeAddColumn('users', 'password_hash TEXT');
 safeAddColumn('users', 'avatar_url TEXT');
-safeAddColumn('users', "bio TEXT DEFAULT 'Hey there! I am using chitAbit.'");
+safeAddColumn('users', "bio TEXT DEFAULT 'Hey there! I am using ChatAbit.'");
 safeAddColumn('users', "status TEXT DEFAULT 'Online'");
 safeAddColumn('users', "file_icon TEXT DEFAULT 'ts'");
 safeAddColumn('users', "message_language TEXT DEFAULT 'typescript'");
@@ -63,7 +63,7 @@ safeAddColumn('messages', 'read_at INTEGER');
 // Seed the default channels (team spec). Users can create more.
 const now = Date.now();
 export const DEFAULT_CHANNELS: { id: string; description: string }[] = [
-  { id: 'general', description: 'General discussion for all chitAbit members' },
+  { id: 'general', description: 'General discussion for all ChatAbit members' },
   { id: 'javascript', description: 'JavaScript, TypeScript, Node.js and the web' },
   { id: 'python', description: 'Python, scripting and data tooling' },
   { id: 'devops', description: 'CI/CD, Docker, cloud and infrastructure' },
@@ -186,7 +186,7 @@ export const dbService = {
     displayName: string = username,
     avatarColor: string = '#06C755',
     avatarUrl: string | null = null,
-    bio: string = 'Hey there! I am using chitAbit.'
+    bio: string = 'Hey there! I am using ChatAbit.'
   ): UserRow {
     const createdAt = Date.now();
     db.prepare(`
@@ -407,7 +407,7 @@ export const dbService = {
       ch = {
         id: 'general',
         name: 'general',
-        description: 'General discussion for all chitAbit members',
+        description: 'General discussion for all ChatAbit members',
         created_by: 'system',
         created_at: Date.now(),
       };
@@ -776,17 +776,55 @@ export const dbService = {
   },
 
   // viewerId: only messages this user may see (any channel, or DMs they are part of)
+  // Supports filter prefixes: from:@user, in:#channel, has:file, and keyword matching
   searchMessages(query: string, viewerId: string, channelId?: string, user1Id?: string, user2Id?: string): MessageWithReactions[] {
-    const cleanQ = likeContains(query);
+    let rawQuery = query.trim();
+    let fromUser: string | undefined;
+    let inChannel: string | undefined;
+    let hasFile = false;
+
+    // Parse from:@user or from:user
+    const fromMatch = rawQuery.match(/\bfrom:@?([a-zA-Z0-9_\-\.]+)\b/i);
+    if (fromMatch) {
+      fromUser = fromMatch[1];
+      rawQuery = rawQuery.replace(fromMatch[0], '').trim();
+    }
+
+    // Parse in:#channel or in:channel
+    const inMatch = rawQuery.match(/\bin:#?([a-zA-Z0-9_\-]+)\b/i);
+    if (inMatch) {
+      inChannel = inMatch[1].toLowerCase();
+      rawQuery = rawQuery.replace(inMatch[0], '').trim();
+    }
+
+    // Parse has:file
+    if (/\bhas:file\b/i.test(rawQuery)) {
+      hasFile = true;
+      rawQuery = rawQuery.replace(/\bhas:file\b/gi, '').trim();
+    }
+
     let sql = `
-      SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.is_bot as sender_is_bot
+      SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon, u.message_language as sender_message_language, u.is_bot as sender_is_bot
       FROM messages m
       JOIN users u ON m.sender_id = u.id
-      WHERE m.content LIKE ? ESCAPE '!' AND m.deleted_at IS NULL
+      WHERE m.deleted_at IS NULL
     `;
-    const params: any[] = [cleanQ];
+    const params: any[] = [];
 
-    if (channelId) {
+    if (rawQuery) {
+      sql += ` AND m.content LIKE ? ESCAPE '!'`;
+      params.push(likeContains(rawQuery));
+    }
+
+    if (fromUser) {
+      sql += ` AND (u.username = ? COLLATE NOCASE OR u.display_name = ? COLLATE NOCASE)`;
+      params.push(fromUser, fromUser);
+    }
+
+    if (inChannel) {
+      sql += ` AND (m.channel_id = ? OR m.channel_id = (SELECT id FROM channels WHERE name = ? COLLATE NOCASE))`;
+      params.push(inChannel, inChannel);
+    } else if (channelId) {
       sql += ` AND m.channel_id = ?`;
       params.push(channelId);
     } else if (user1Id && user2Id) {
@@ -797,16 +835,61 @@ export const dbService = {
       params.push(user1Id, user2Id, user2Id, user1Id);
     }
 
+    if (hasFile) {
+      sql += ` AND m.attachment_url IS NOT NULL`;
+    }
+
     sql += ` AND (m.channel_id IS NOT NULL OR m.sender_id = ? OR m.dm_recipient_id = ?)`;
     params.push(viewerId, viewerId);
 
-    sql += ` ORDER BY m.created_at DESC LIMIT 30`;
+    sql += ` ORDER BY m.created_at DESC LIMIT 50`;
     const rows = db.prepare(sql).all(...params) as any[];
     const reactionsMap = this.getReactionsForMessages(rows.map((r) => r.id));
 
     return rows.map((m) => ({
       ...m,
       sender_is_bot: Boolean(m.sender_is_bot),
+      sender_file_icon: m.sender_file_icon || 'ts',
+      sender_message_language: m.sender_message_language || 'typescript',
+      message_language: m.message_language || m.sender_message_language || 'typescript',
+      reactions: reactionsMap.get(m.id) || [],
+    }));
+  },
+
+  // Fetch messages created after `since` timestamp for catchup after socket reconnect
+  getMessagesSince(viewerId: string, since: number, channelId?: string, dmUserId?: string): MessageWithReactions[] {
+    let query = `
+      SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon, u.message_language as sender_message_language, u.is_bot as sender_is_bot
+      FROM messages m
+      JOIN users u ON m.sender_id = u.id
+      WHERE m.created_at > ? AND m.deleted_at IS NULL
+    `;
+    const params: any[] = [since];
+
+    if (channelId) {
+      query += ` AND m.channel_id = ?`;
+      params.push(channelId);
+    } else if (dmUserId) {
+      query += ` AND m.channel_id IS NULL AND (
+        (m.sender_id = ? AND m.dm_recipient_id = ?) OR
+        (m.sender_id = ? AND m.dm_recipient_id = ?)
+      )`;
+      params.push(viewerId, dmUserId, dmUserId, viewerId);
+    } else {
+      query += ` AND (m.channel_id IS NOT NULL OR m.sender_id = ? OR m.dm_recipient_id = ?)`;
+      params.push(viewerId, viewerId);
+    }
+
+    query += ` ORDER BY m.created_at ASC LIMIT 100`;
+    const rows = db.prepare(query).all(...params) as any[];
+    const reactionsMap = this.getReactionsForMessages(rows.map((m) => m.id));
+
+    return rows.map((m) => ({
+      ...m,
+      sender_is_bot: Boolean(m.sender_is_bot),
+      sender_file_icon: m.sender_file_icon || 'ts',
+      sender_message_language: m.sender_message_language || 'typescript',
+      message_language: m.message_language || m.sender_message_language || 'typescript',
       reactions: reactionsMap.get(m.id) || [],
     }));
   },

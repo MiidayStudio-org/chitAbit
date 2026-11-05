@@ -141,7 +141,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   const insertCodeTemplate = (lang = 'typescript') => {
-    const template = `\`\`\`${lang}\n// Code snippet\nconsole.log("chitAbit");\n\`\`\``;
+    const template = `\`\`\`${lang}\n// Code snippet\nconsole.log("ChatAbit");\n\`\`\``;
     setText((prev) => (prev ? `${prev}\n${template}` : template));
     setShowAttachmentMenu(false);
     textareaRef.current?.focus();

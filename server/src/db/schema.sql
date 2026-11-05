@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT NOT NULL,
   avatar_color TEXT NOT NULL,
   avatar_url TEXT,
-  bio TEXT DEFAULT 'Hey there! I am using chitAbit.',
+  bio TEXT DEFAULT 'Hey there! I am using ChatAbit.',
   status TEXT DEFAULT 'Online',
   file_icon TEXT DEFAULT 'ts',
   message_language TEXT DEFAULT 'typescript',

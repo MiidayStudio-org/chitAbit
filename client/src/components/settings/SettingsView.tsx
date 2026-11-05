@@ -298,7 +298,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             className="w-full mt-2 py-2.5 bg-red-50 hover:bg-red-100 dark:bg-red-950/30 dark:hover:bg-red-950/60 text-red-600 dark:text-red-400 font-semibold text-xs rounded-xl flex items-center justify-center gap-2 cursor-pointer transition-all border border-red-200/60 dark:border-red-900/40"
           >
             <LogOut className="w-4 h-4" />
-            <span>Log Out of chitAbit</span>
+            <span>Log Out of ChatAbit</span>
           </button>
         </div>
       </div>

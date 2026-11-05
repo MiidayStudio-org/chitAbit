@@ -44,7 +44,7 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
     id: 'general',
     name: 'general',
     displayName: '#general',
-    description: 'General discussion for all chitAbit members',
+    description: 'General discussion for all ChatAbit members',
   };
 
   // Sort friends by latest message timestamp
@@ -215,7 +215,7 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
                   </div>
                   <div className="flex items-center justify-between mt-0.5">
                     <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
-                      {lastMessages['channel_general']?.content || 'General discussion for all chitAbit members'}
+                      {lastMessages['channel_general']?.content || 'General discussion for all ChatAbit members'}
                     </p>
                     {unreadCounts['general'] > 0 && (
                       <span className="min-w-[18px] h-[18px] px-1 bg-[#06C755] text-white text-[10px] font-bold rounded-full flex items-center justify-center flex-shrink-0 ml-1.5 shadow-sm">
