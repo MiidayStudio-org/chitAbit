@@ -183,6 +183,21 @@ export default {
     const secret = env.JWT_SECRET || 'dev-secret-for-cloudflare-worker-chitabit';
     const db = env.DB || env.chitabit_db;
 
+    // Root status endpoint
+    if (url.pathname === '/' || url.pathname === '') {
+      return jsonResponse(
+        {
+          name: 'chitAbit API Server',
+          status: 'online',
+          runtime: 'Cloudflare Worker',
+          health: '/api/health',
+          message: 'Backend is running live. Access the chat UI via your Cloudflare Pages frontend URL.',
+        },
+        200,
+        cors
+      );
+    }
+
     // 2. Health check
     if (url.pathname === '/api/health') {
       return jsonResponse(
