@@ -385,10 +385,31 @@ export default {
       return jsonResponse(results || [], 200, cors);
     }
 
+    if (url.pathname === '/api/channels' && request.method === 'POST') {
+      if (!authUser) return errorResponse('Unauthorized', 401, cors);
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      try {
+        const body: any = await request.json();
+        const name = (body.name || '').trim().toLowerCase().replace(/^#/, '');
+        const description = (body.description || '').trim();
+        if (!name) return errorResponse('Channel name required', 400, cors);
+
+        const id = name;
+        const now = Date.now();
+        await db.prepare('INSERT INTO channels (id, name, description, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
+          .bind(id, name, description, authUser.id, now)
+          .run();
+
+        return jsonResponse({ channel: { id, name, description, created_by: authUser.id, created_at: now } }, 201, cors);
+      } catch (err: any) {
+        return errorResponse(err.message || 'Failed to create channel', 500, cors);
+      }
+    }
+
     // 5. Messages API
     if (url.pathname === '/api/messages/unread' && request.method === 'GET') {
       if (!authUser) return errorResponse('Unauthorized', 401, cors);
-      return jsonResponse({}, 200, cors);
+      return jsonResponse({ unreadCounts: {} }, 200, cors);
     }
 
     // 6. Direct Messages fetch
@@ -406,7 +427,7 @@ export default {
       )
         .bind(u1, u2, u2, u1)
         .all();
-      return jsonResponse(results || [], 200, cors);
+      return jsonResponse({ messages: results || [] }, 200, cors);
     }
 
     // 7. Channel Messages fetch
@@ -423,7 +444,74 @@ export default {
       )
         .bind(channelId)
         .all();
-      return jsonResponse(results || [], 200, cors);
+      return jsonResponse({ messages: results || [] }, 200, cors);
+    }
+
+    // 7b. Send Message API (Edge Fallback & Universal REST Send)
+    if (url.pathname === '/api/messages/send' && request.method === 'POST') {
+      if (!authUser) return errorResponse('Unauthorized', 401, cors);
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      try {
+        const body: any = await request.json();
+        const content = (body.content || '').trim();
+        if (!content) return errorResponse('Message content required', 400, cors);
+
+        const id = `m_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const channelId = body.channelId || null;
+        const dmRecipientId = body.dmRecipientId || null;
+        const now = Date.now();
+
+        await db.prepare(
+          `INSERT INTO messages (id, channel_id, dm_recipient_id, sender_id, sender_username, message_language, content, attachment_url, attachment_type, attachment_name, attachment_size, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            id,
+            channelId,
+            dmRecipientId,
+            authUser.id,
+            authUser.username,
+            body.messageLanguage || 'typescript',
+            content,
+            body.attachmentUrl || null,
+            body.attachmentType || null,
+            body.attachmentName || null,
+            body.attachmentSize || null,
+            now
+          )
+          .run();
+
+        const sender: any = await db.prepare('SELECT * FROM users WHERE id = ?').bind(authUser.id).first();
+
+        const message = {
+          id,
+          channel_id: channelId,
+          dm_recipient_id: dmRecipientId,
+          sender_id: authUser.id,
+          sender_username: authUser.username,
+          sender_display_name: sender?.display_name || authUser.username,
+          sender_avatar_color: sender?.avatar_color || '#3b82f6',
+          sender_avatar_url: sender?.avatar_url || null,
+          sender_file_icon: sender?.file_icon || 'ts',
+          sender_message_language: body.messageLanguage || 'typescript',
+          message_language: body.messageLanguage || 'typescript',
+          content,
+          attachment_url: body.attachmentUrl || null,
+          attachment_type: body.attachmentType || null,
+          attachment_name: body.attachmentName || null,
+          attachment_size: body.attachmentSize || null,
+          created_at: now,
+          edited_at: null,
+          deleted_at: null,
+          reactions: [],
+          status: 'sent',
+          localTempId: body.localTempId || null,
+        };
+
+        return jsonResponse({ success: true, message }, 201, cors);
+      } catch (err: any) {
+        return errorResponse(err.message || 'Failed to send message', 500, cors);
+      }
     }
 
     // 8. Friends Search API

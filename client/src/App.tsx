@@ -545,7 +545,7 @@ export const App: React.FC = () => {
       if (activeChat.type === 'channel') {
         const res = await fetch(`/api/channels/${activeChat.id}/messages?limit=40`);
         const data = await res.json();
-        const msgList = data.messages || [];
+        const msgList = Array.isArray(data) ? data : (data.messages || []);
         setMessages(msgList);
         setHasMoreOlderMessages(msgList.length >= 40);
         setUnreadCounts((prev) => ({ ...prev, [activeChat.id]: 0 }));
@@ -565,7 +565,7 @@ export const App: React.FC = () => {
       } else if (activeChat.type === 'dm') {
         const res = await fetch(`/api/messages/dm/${user.id}/${activeChat.id}?limit=40`);
         const data = await res.json();
-        const msgList = data.messages || [];
+        const msgList = Array.isArray(data) ? data : (data.messages || []);
         setMessages(msgList);
         setHasMoreOlderMessages(msgList.length >= 40);
         setUnreadCounts((prev) => ({ ...prev, [activeChat.id]: 0 }));
@@ -598,7 +598,15 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     fetchMessages();
-  }, [fetchMessages]);
+    // In Edge/Serverless environments (Cloudflare Workers) where Socket.IO daemon
+    // is offline, poll every 3.5s so messages update in real time
+    if (!socket?.connected) {
+      const interval = setInterval(() => {
+        fetchMessages();
+      }, 3500);
+      return () => clearInterval(interval);
+    }
+  }, [fetchMessages, socket?.connected]);
 
   // Fetch messages when splitChat changes
   const fetchSplitMessages = useCallback(async () => {
@@ -1120,15 +1128,13 @@ export const App: React.FC = () => {
       edited_at: null,
       deleted_at: null,
       reactions: [],
-      status: isConnected ? 'pending' : 'failed',
+      status: 'pending',
       localTempId: tempId,
     };
 
     setMessages((prev) => [...prev, optimisticMsg]);
 
-    if (!isConnected || !socket) return;
-
-    socket.emit('message:send', {
+    const payload = {
       channelId: activeChat.type === 'channel' ? activeChat.id : null,
       dmRecipientId: activeChat.type === 'dm' ? activeChat.id : null,
       content,
@@ -1141,22 +1147,54 @@ export const App: React.FC = () => {
       attachmentName: attachment?.name || null,
       attachmentSize: attachment?.size || null,
       localTempId: tempId,
-    });
+    };
 
-    setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === tempId && m.status === 'pending' ? { ...m, status: 'failed' } : m))
-      );
-    }, 8000);
+    if (isConnected && socket) {
+      socket.emit('message:send', payload);
+      setTimeout(() => {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === tempId && m.status === 'pending' ? { ...m, status: 'failed' } : m))
+        );
+      }, 8000);
+    } else {
+      // Universal REST fallback for Edge/Cloudflare Workers
+      fetch('/api/messages/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success && data.message) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === tempId || m.localTempId === tempId
+                  ? { ...data.message, status: 'sent' }
+                  : m
+              )
+            );
+          } else {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === tempId ? { ...m, status: 'failed' } : m))
+            );
+          }
+        })
+        .catch(() => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === tempId ? { ...m, status: 'failed' } : m))
+          );
+        });
+    }
   };
 
   const handleRetryMessage = useCallback(
     (msg: Message) => {
-      if (!socket?.connected || !user) return;
+      if (!user) return;
       setMessages((prev) =>
         prev.map((m) => (m.id === msg.id ? { ...m, status: 'pending' } : m))
       );
-      socket.emit('message:send', {
+
+      const payload = {
         channelId: msg.channel_id,
         dmRecipientId: msg.dm_recipient_id,
         content: msg.content,
@@ -1169,7 +1207,38 @@ export const App: React.FC = () => {
         attachmentName: msg.attachment_name,
         attachmentSize: msg.attachment_size,
         localTempId: msg.id,
-      });
+      };
+
+      if (socket?.connected) {
+        socket.emit('message:send', payload);
+      } else {
+        fetch('/api/messages/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (data.success && data.message) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msg.id || m.localTempId === msg.id
+                    ? { ...data.message, status: 'sent' }
+                    : m
+                )
+              );
+            } else {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === msg.id ? { ...m, status: 'failed' } : m))
+              );
+            }
+          })
+          .catch(() => {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === msg.id ? { ...m, status: 'failed' } : m))
+            );
+          });
+      }
     },
     [socket, user]
   );
