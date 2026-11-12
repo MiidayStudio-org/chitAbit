@@ -7,6 +7,8 @@
     "dev:server": "npm --prefix server run dev",
     "dev:client": "npm --prefix client run dev",
     "build": "npm --prefix client run build",
+    "build:worker": "echo 'Worker does not require a frontend build'",
+    "postinstall": "npm --prefix client install",
     "test": "npm --prefix server test",
     "deploy:backend": "wrangler deploy",
     "deploy:frontend": "npm --prefix client run build && wrangler pages deploy client/dist --project-name chitabit-frontend",

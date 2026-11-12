@@ -19,7 +19,8 @@ export interface D1Database {
 }
 
 export interface Env {
-  DB: D1Database;
+  DB?: D1Database;
+  chitabit_db?: D1Database;
   JWT_SECRET?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
@@ -180,6 +181,7 @@ export default {
     }
 
     const secret = env.JWT_SECRET || 'dev-secret-for-cloudflare-worker-chitabit';
+    const db = env.DB || env.chitabit_db;
 
     // 2. Health check
     if (url.pathname === '/api/health') {
@@ -210,7 +212,9 @@ export default {
           return errorResponse('Password must be at least 6 characters', 400, cors);
         }
 
-        const existing = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        if (!db) return errorResponse('Database not initialized', 500, cors);
+
+        const existing = await db.prepare('SELECT id FROM users WHERE username = ?')
           .bind(username)
           .first();
 
@@ -224,7 +228,7 @@ export default {
         const avatarColor = avatarColors[Math.floor(Math.random() * avatarColors.length)];
         const now = Date.now();
 
-        await env.DB.prepare(
+        await db.prepare(
           `INSERT INTO users (id, username, password_hash, display_name, avatar_color, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`
         )
@@ -247,11 +251,12 @@ export default {
 
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       try {
+        if (!db) return errorResponse('Database not initialized', 500, cors);
         const body: any = await request.json();
         const username = (body.username || '').trim().toLowerCase();
         const password = body.password || '';
 
-        const user: any = await env.DB.prepare('SELECT * FROM users WHERE username = ?')
+        const user: any = await db.prepare('SELECT * FROM users WHERE username = ?')
           .bind(username)
           .first();
 
@@ -296,7 +301,8 @@ export default {
 
     if (url.pathname === '/api/auth/me' && request.method === 'GET') {
       if (!authUser) return errorResponse('Unauthorized', 401, cors);
-      const user: any = await env.DB.prepare('SELECT * FROM users WHERE id = ?')
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      const user: any = await db.prepare('SELECT * FROM users WHERE id = ?')
         .bind(authUser.id)
         .first();
 
@@ -324,9 +330,10 @@ export default {
 
     if (url.pathname === '/api/auth/profile' && request.method === 'PUT') {
       if (!authUser) return errorResponse('Unauthorized', 401, cors);
+      if (!db) return errorResponse('Database not initialized', 500, cors);
       const body: any = await request.json();
 
-      await env.DB.prepare(
+      await db.prepare(
         `UPDATE users
          SET display_name = COALESCE(?, display_name),
              bio = COALESCE(?, bio),
@@ -349,7 +356,7 @@ export default {
         )
         .run();
 
-      const user: any = await env.DB.prepare('SELECT * FROM users WHERE id = ?')
+      const user: any = await db.prepare('SELECT * FROM users WHERE id = ?')
         .bind(authUser.id)
         .first();
 
@@ -358,7 +365,8 @@ export default {
 
     // 4. Channels API
     if (url.pathname === '/api/channels' && request.method === 'GET') {
-      const { results } = await env.DB.prepare('SELECT * FROM channels ORDER BY created_at ASC').all();
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      const { results } = await db.prepare('SELECT * FROM channels ORDER BY created_at ASC').all();
       return jsonResponse(results || [], 200, cors);
     }
 
@@ -371,8 +379,9 @@ export default {
     // 6. Direct Messages fetch
     const dmMatch = url.pathname.match(/^\/api\/messages\/dm\/([^/]+)\/([^/]+)$/);
     if (dmMatch && request.method === 'GET') {
+      if (!db) return errorResponse('Database not initialized', 500, cors);
       const [, u1, u2] = dmMatch;
-      const { results } = await env.DB.prepare(
+      const { results } = await db.prepare(
         `SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon
          FROM messages m
          LEFT JOIN users u ON m.sender_id = u.id
@@ -388,8 +397,9 @@ export default {
     // 7. Channel Messages fetch
     const chMsgMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/messages$/);
     if (chMsgMatch && request.method === 'GET') {
+      if (!db) return errorResponse('Database not initialized', 500, cors);
       const channelId = chMsgMatch[1];
-      const { results } = await env.DB.prepare(
+      const { results } = await db.prepare(
         `SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon
          FROM messages m
          LEFT JOIN users u ON m.sender_id = u.id
@@ -404,7 +414,8 @@ export default {
     // 8. Friends API
     if (url.pathname === '/api/friends/list' && request.method === 'GET') {
       if (!authUser) return errorResponse('Unauthorized', 401, cors);
-      const { results } = await env.DB.prepare(
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      const { results } = await db.prepare(
         `SELECT u.id, u.username, u.display_name, u.avatar_color, u.avatar_url, u.file_icon, u.status, u.bio
          FROM friends f
          JOIN users u ON f.friend_id = u.id
