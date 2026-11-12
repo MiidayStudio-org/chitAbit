@@ -426,9 +426,45 @@ export default {
       return jsonResponse(results || [], 200, cors);
     }
 
-    // 8. Friends API
-    if (url.pathname === '/api/friends/list' && request.method === 'GET') {
-      if (!authUser) return errorResponse('Unauthorized', 401, cors);
+    // 8. Friends Search API
+    if (url.pathname === '/api/friends/search' && request.method === 'GET') {
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+      if (!query) {
+        return jsonResponse({ users: [] }, 200, cors);
+      }
+
+      const currentId = authUser?.id || '';
+      const likePattern = `%${query}%`;
+      const { results } = await db.prepare(
+        `SELECT id, username, display_name, avatar_color, avatar_url, file_icon, status, bio
+         FROM users
+         WHERE is_bot = 0
+           AND id != ?
+           AND (LOWER(username) LIKE ? OR LOWER(display_name) LIKE ?)
+         LIMIT 20`
+      )
+        .bind(currentId, likePattern, likePattern)
+        .all();
+
+      const users = (results || []).map((u: any) => ({
+        id: u.id,
+        username: u.username,
+        displayName: u.display_name,
+        avatarColor: u.avatar_color,
+        avatarUrl: u.avatar_url,
+        fileIcon: u.file_icon,
+        status: u.status,
+        bio: u.bio,
+      }));
+
+      return jsonResponse({ users }, 200, cors);
+    }
+
+    // Friends List API
+    if ((url.pathname === '/api/friends' || url.pathname === '/api/friends/list') && request.method === 'GET') {
+      const targetUserId = authUser?.id || url.searchParams.get('userId');
+      if (!targetUserId) return errorResponse('Unauthorized', 401, cors);
       if (!db) return errorResponse('Database not initialized', 500, cors);
       const { results } = await db.prepare(
         `SELECT u.id, u.username, u.display_name, u.avatar_color, u.avatar_url, u.file_icon, u.status, u.bio
@@ -436,9 +472,123 @@ export default {
          JOIN users u ON f.friend_id = u.id
          WHERE f.user_id = ?`
       )
-        .bind(authUser.id)
+        .bind(targetUserId)
         .all();
-      return jsonResponse({ friends: results || [] }, 200, cors);
+
+      const friends = (results || []).map((u: any) => ({
+        id: u.id,
+        username: u.username,
+        displayName: u.display_name,
+        avatarColor: u.avatar_color,
+        avatarUrl: u.avatar_url,
+        fileIcon: u.file_icon,
+        status: u.status,
+        bio: u.bio,
+      }));
+
+      return jsonResponse({ friends }, 200, cors);
+    }
+
+    // Friend Requests GET API
+    if (url.pathname === '/api/friends/requests' && request.method === 'GET') {
+      const targetUserId = authUser?.id || url.searchParams.get('userId');
+      if (!targetUserId) return errorResponse('Unauthorized', 401, cors);
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+
+      const { results: incoming } = await db.prepare(
+        `SELECT fr.*, u.username as sender_username, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color
+         FROM friend_requests fr
+         JOIN users u ON fr.sender_id = u.id
+         WHERE fr.receiver_id = ? AND fr.status = 'pending'
+         ORDER BY fr.created_at DESC`
+      )
+        .bind(targetUserId)
+        .all();
+
+      const { results: outgoing } = await db.prepare(
+        `SELECT fr.*, u.username as receiver_username, u.display_name as receiver_display_name, u.avatar_color as receiver_avatar_color
+         FROM friend_requests fr
+         JOIN users u ON fr.receiver_id = u.id
+         WHERE fr.sender_id = ? AND fr.status = 'pending'
+         ORDER BY fr.created_at DESC`
+      )
+        .bind(targetUserId)
+        .all();
+
+      return jsonResponse({ incoming: incoming || [], outgoing: outgoing || [] }, 200, cors);
+    }
+
+    // Friend Request POST API
+    if (url.pathname === '/api/friends/request' && request.method === 'POST') {
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      try {
+        const body: any = await request.json();
+        const senderId = authUser?.id || body.senderId;
+        if (!senderId) return errorResponse('Unauthorized', 401, cors);
+
+        let targetUser: any = null;
+        if (body.targetUserId) {
+          targetUser = await db.prepare('SELECT * FROM users WHERE id = ?').bind(body.targetUserId).first();
+        } else if (body.targetUsername) {
+          const clean = body.targetUsername.trim().toLowerCase().replace(/^@/, '');
+          targetUser = await db.prepare('SELECT * FROM users WHERE LOWER(username) = ?').bind(clean).first();
+        }
+
+        if (!targetUser) {
+          return errorResponse('Target user does not exist', 404, cors);
+        }
+
+        if (targetUser.id === senderId) {
+          return errorResponse('Cannot add yourself as a friend', 400, cors);
+        }
+
+        const now = Date.now();
+        // Add both directions to friends table
+        await db.prepare('INSERT OR IGNORE INTO friends (user_id, friend_id, created_at) VALUES (?, ?, ?)')
+          .bind(senderId, targetUser.id, now)
+          .run();
+        await db.prepare('INSERT OR IGNORE INTO friends (user_id, friend_id, created_at) VALUES (?, ?, ?)')
+          .bind(targetUser.id, senderId, now)
+          .run();
+
+        return jsonResponse({ success: true, autoAccepted: true, message: 'Friend added!' }, 200, cors);
+      } catch (err: any) {
+        return errorResponse(err.message || 'Failed to send request', 500, cors);
+      }
+    }
+
+    // Friend Request Respond API
+    if (url.pathname === '/api/friends/respond' && request.method === 'POST') {
+      if (!db) return errorResponse('Database not initialized', 500, cors);
+      try {
+        const body: any = await request.json();
+        const { requestId, action } = body;
+        const receiverId = authUser?.id;
+        if (!receiverId) return errorResponse('Unauthorized', 401, cors);
+
+        const req: any = await db.prepare("SELECT * FROM friend_requests WHERE id = ? AND receiver_id = ?")
+          .bind(requestId, receiverId)
+          .first();
+
+        if (!req) return errorResponse('Request not found', 404, cors);
+
+        if (action === 'accept') {
+          const now = Date.now();
+          await db.prepare('INSERT OR IGNORE INTO friends (user_id, friend_id, created_at) VALUES (?, ?, ?)')
+            .bind(req.sender_id, req.receiver_id, now)
+            .run();
+          await db.prepare('INSERT OR IGNORE INTO friends (user_id, friend_id, created_at) VALUES (?, ?, ?)')
+            .bind(req.receiver_id, req.sender_id, now)
+            .run();
+          await db.prepare("UPDATE friend_requests SET status = 'accepted' WHERE id = ?").bind(requestId).run();
+        } else {
+          await db.prepare("UPDATE friend_requests SET status = 'declined' WHERE id = ?").bind(requestId).run();
+        }
+
+        return jsonResponse({ success: true }, 200, cors);
+      } catch (err: any) {
+        return errorResponse(err.message || 'Failed to respond', 500, cors);
+      }
     }
 
     // 9. Upload API (Base64 data URLs / local files)
