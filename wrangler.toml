@@ -1,0 +1,16 @@
+name = "chitabit-backend"
+main = "server/src/worker.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+CLIENT_ORIGIN = "*"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# D1 Database binding
+# Step 1: Run `npx wrangler d1 create chitabit-db`
+# Step 2: Paste the resulting database_id below
+[[d1_databases]]
+binding = "chitabit_db"
+database_name = "chitabit-db"
+database_id = "9a0e33cc-2f11-41df-8dbe-4cedd24229d1"

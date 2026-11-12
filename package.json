@@ -7,9 +7,15 @@
     "dev:server": "npm --prefix server run dev",
     "dev:client": "npm --prefix client run dev",
     "build": "npm --prefix client run build",
-    "test": "npm --prefix server test"
+    "test": "npm --prefix server test",
+    "deploy:backend": "wrangler deploy",
+    "deploy:frontend": "npm --prefix client run build && wrangler pages deploy client/dist --project-name chitabit-frontend",
+    "db:migrate:local": "wrangler d1 execute chitabit-db --local --file=./server/src/db/schema.sql",
+    "db:migrate:remote": "wrangler d1 execute chitabit-db --remote --file=./server/src/db/schema.sql",
+    "preview:backend": "wrangler dev"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "wrangler": "^4.160.1"
   }
 }
