@@ -138,6 +138,24 @@ The application will be live at:
 
 ---
 
+## PostgreSQL setup
+
+The Node backend currently uses SQLite. These commands prepare a PostgreSQL
+database for the planned cutover.
+
+1. In Supabase, open **Connect** and copy the Direct connection URI, or the
+   Session pooler URI (port 5432) if your environment is IPv4-only.
+2. Set `DATABASE_URL` in the root `.env` and configure TLS with certificate
+   verification for the hosted connection.
+3. Run `npm --prefix server run db:migrate` to create the `chitabit` schema.
+   The migration creates tables and indexes. Data import and default channel
+   seeding are separate from this step.
+
+When changing the PostgreSQL schema, run `npm --prefix server run db:generate`
+and check in the generated migration and metadata.
+
+---
+
 ## 🧪 Running Tests
 
 To run the automated tests covering auth and access control, channels, unread counts, friends, socket events, slash commands, and the DevBot service:
