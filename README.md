@@ -1,6 +1,6 @@
 # ⚡ chitAbit — Real-Time Developer & AI Chat
 
-A modern, developer-first real-time chat application featuring rich Markdown, syntax-highlighted code blocks with interactive quick actions, SQLite persistence, slash commands, channel & direct messaging, and an integrated Senior AI Engineer chatbot (**DevBot**) powered by Google Gemini.
+A modern, developer-first real-time chat application featuring rich Markdown, syntax-highlighted code blocks with interactive quick actions, PostgreSQL persistence, slash commands, channel & direct messaging, and an integrated Senior AI Engineer chatbot (**DevBot**) powered by Google Gemini.
 
 ---
 
@@ -63,7 +63,7 @@ A modern, developer-first real-time chat application featuring rich Markdown, sy
 ## 🛠️ Tech Stack
 
 - **Backend**: Node.js, Express, Socket.IO, `tsx`
-- **Database**: SQLite via `better-sqlite3` (stored in `./data/chat.db`)
+- **Database**: PostgreSQL via Drizzle and `pg` in the Node backend
 - **Frontend**: React 19, Vite, TypeScript, Tailwind CSS, Lucide Icons
 - **AI Integration**: Google Gemini API (`@google/genai`)
 - **Markdown & Code**: `react-markdown`, `remark-gfm`, `highlight.js`
@@ -75,10 +75,7 @@ A modern, developer-first real-time chat application featuring rich Markdown, sy
 
 ### 1. Prerequisites
 - Node.js 20 or 22 LTS (recommended) and npm.
-- `better-sqlite3` is a native module. If no prebuilt binary exists for your Node version
-  (for example very new Node releases on Windows), npm compiles it and needs build tools:
-  on Windows, Visual Studio with **"Desktop development with C++"** and a **Windows SDK**.
-  Using Node 22 LTS usually avoids this.
+- A PostgreSQL database for the Node backend, for example a Supabase project.
 
 ### 2. Environment Setup
 Copy the example environment file:
@@ -89,8 +86,8 @@ cp .env.example .env
 Open `.env` and set at least:
 ```env
 PORT=3001
-GEMINI_API_KEY=your_gemini_api_key_here
 JWT_SECRET=a_long_random_string
+DATABASE_URL=postgresql://user:password@host:5432/postgres
 ```
 
 Generate a `JWT_SECRET` with:
@@ -106,7 +103,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 | `GEMINI_MODEL` | no | Gemini model (default `gemini-2.5-flash`) |
 | `DEVBOT_MAX_PER_MINUTE` | no | DevBot questions per user per minute (default 5) |
 | `CLIENT_ORIGIN` | production | Allowed frontend URL(s) for CORS, comma-separated |
-| `DB_PATH` | no | SQLite file (default `data/chat.db`) |
+| `DATABASE_URL` | yes | PostgreSQL connection URI for the Node backend |
 
 > **🔑 How to get a Gemini API key:**
 > 1. Visit [Google AI Studio](https://aistudio.google.com/).
@@ -127,8 +124,9 @@ npm --prefix client install
 ```
 
 ### 4. Start the Application
-Run both backend and frontend concurrently with a single command from root:
+Apply the PostgreSQL migrations, then start both services from the project root:
 ```bash
+npm --prefix server run db:migrate
 npm run dev
 ```
 
@@ -140,16 +138,19 @@ The application will be live at:
 
 ## PostgreSQL setup
 
-The Node backend currently uses SQLite. These commands prepare a PostgreSQL
-database for the planned cutover.
+The Node backend reads and writes PostgreSQL. The Cloudflare Worker uses D1.
+For a fresh setup, run the schema migration and start the app. The backend seeds
+the default channels on startup. Import a backup only if you want to keep existing
+SQLite or D1 records.
 
 1. In Supabase, open **Connect** and copy the Direct connection URI, or the
    Session pooler URI (port 5432) if your environment is IPv4-only.
 2. Set `DATABASE_URL` in the root `.env` and configure TLS with certificate
-   verification for the hosted connection.
+   verification for the hosted connection using the Supabase CA path
+   (`sslmode=verify-full&sslrootcert=/absolute/path/to/prod-ca-2021.crt`).
 3. Run `npm --prefix server run db:migrate` to create the `chitabit` schema.
-   The migration creates tables and indexes. Data import and default channel
-   seeding are separate from this step.
+   The migration creates tables and indexes. The Node backend seeds default
+   channels and the DevBot account at startup.
 
 When changing the PostgreSQL schema, run `npm --prefix server run db:generate`
 and check in the generated migration and metadata.
@@ -163,7 +164,8 @@ To run the automated tests covering auth and access control, channels, unread co
 npm test
 ```
 
-Tests use an in-memory database, so they never touch `data/chat.db`.
+Tests run the Drizzle migrations against an isolated, in-memory PostgreSQL
+database using PGlite.
 
 ---
 
@@ -216,13 +218,13 @@ chitAbit/
 ├── .env.example              # Template environment variables
 ├── .gitignore                # Git ignore rules
 ├── README.md                 # Project documentation
-├── data/                     # SQLite database storage (chat.db)
+├── data/                     # Legacy local SQLite data, if present
 ├── server/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── src/
 │   │   ├── index.ts          # Express + Socket.IO server setup
-│   │   ├── db/               # SQLite connection, schema, seed data, and queries
+│   │   ├── db/               # PostgreSQL queries, schema, and D1 schema
 │   │   ├── routes/           # REST endpoints (/auth, /channels, /messages, /users)
 │   │   ├── sockets/          # Socket.IO event handlers and presence
 │   │   ├── services/         # BotService (Gemini streaming) and SlashCommands parser
@@ -242,3 +244,27 @@ chitAbit/
             ├── layout/       # Sidebar, Header, QuickSwitcher (Ctrl+K)
             └── modals/       # CreateChannelModal, LoginModal, EditMessageModal
 ```
+
+## Optional legacy chat import
+
+Use an existing SQLite backup or a trusted full Cloudflare D1 export. Backups
+contain private messages and password hashes, so keep them outside the repository
+with access restricted to the migration operator.
+
+1. Pause production writes for the final snapshot. For D1, export schema and data
+   with `npx wrangler d1 export chitabit-db --remote --output=/private/path/chitabit-d1.sql`.
+   For local SQLite, use SQLite's backup command so the snapshot includes WAL changes.
+   Back up the PostgreSQL destination before applying the import.
+2. With a migrated PostgreSQL database and its `DATABASE_URL` in the root `.env`,
+   run `npm --prefix server run db:import -- /private/path/chitabit-d1.sql` for a dry run.
+   Add `--apply` to commit the verified import. SQLite backups use the same command
+   with the backup file path. Conflicting destination rows abort the transaction.
+   Copy any legacy files referenced by `/uploads/` to the Node server's uploads directory.
+3. Deploy the Node server with production `JWT_SECRET`, `DATABASE_URL` and
+   `CLIENT_ORIGIN`. Build Pages with `VITE_API_URL` and `VITE_SOCKET_URL` set to the
+   Node server's HTTPS origin. Check login with an imported account, delivery between
+   two clients, unread counts, search and attachments before releasing the Pages build.
+   D1 users can log in with their existing password and should expect to sign in
+   again after cutover. Keep the old Pages deployment and D1 backup for rollback.
+   Any new messages written to PostgreSQL after cutover need to be reconciled before
+   reopening writes to D1.

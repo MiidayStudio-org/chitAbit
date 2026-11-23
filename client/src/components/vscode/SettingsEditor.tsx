@@ -1,3 +1,4 @@
+import { resolveUploadUrl } from '../../utils/authFetch';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { User, Channel, ChatAbitSettings, KeyboardShortcutItem } from '../../types';
 import { FILE_ICON_OPTIONS, FileIcon, getFileIconForLanguage } from '../../utils/fileIcons';
@@ -743,7 +744,7 @@ export const SettingsEditor: React.FC<SettingsEditorProps> = ({
                         >
                           <div className="relative group-hover/photo:scale-105 transition-transform">
                             <img
-                              src={settings['profile.avatarUrl']}
+                              src={resolveUploadUrl(settings['profile.avatarUrl'])}
                               alt="Uploaded photo preview"
                               className="w-16 h-16 rounded-full object-cover border-2 border-[#a6e3a1] shadow-md group-hover/photo:border-[#cba6f7]"
                             />

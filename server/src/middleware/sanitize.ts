@@ -62,5 +62,5 @@ export function parseLimit(value: unknown, fallback = 40): number {
 
 export function parseBefore(value: unknown): number | undefined {
   const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.ceil(n), Number.MAX_SAFE_INTEGER) : undefined;
 }

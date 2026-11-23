@@ -1,3 +1,4 @@
+import { resolveUploadUrl } from '../../utils/authFetch';
 import React, { useState } from 'react';
 import { FileIcon } from '../../utils/fileIcons';
 
@@ -115,7 +116,7 @@ export const DualIdentityAvatar: React.FC<DualIdentityAvatarProps> = ({
             }}
           >
             <img
-              src={avatarUrl!}
+              src={resolveUploadUrl(avatarUrl!)}
               alt={alt}
               className="w-full h-full object-cover pointer-events-none"
               onError={(e) => {

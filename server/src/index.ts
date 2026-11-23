@@ -1,5 +1,5 @@
 import './config/env.js'; // must stay first: loads .env before other modules read it
-import express from 'express';
+import express, { type ErrorRequestHandler } from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
@@ -16,6 +16,7 @@ import uploadRoutes from './routes/upload.js';
 import mediaRoutes from './routes/media.js';
 import { registerChatHandlers } from './sockets/chatHandler.js';
 import { getJwtSecret } from './middleware/auth.js';
+import { seedChatDatabase } from './db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +92,19 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+const handleApiError: ErrorRequestHandler = (err, req, res, next) => {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  const status = err.status === 400 || err.status === 413 ? err.status : 500;
+  if (status === 500) console.error(`[API] ${req.method} ${req.path} failed`);
+  res.status(status).json({
+    error: status === 400 ? 'Invalid request body' : status === 413 ? 'Request body too large' : 'Internal server error',
+  });
+};
+app.use(handleApiError);
+
 // Register Socket.io events
 registerChatHandlers(io);
 
@@ -98,6 +112,7 @@ const PORT = process.env.PORT || 3001;
 
 // Only listen if not imported by tests
 if (process.env.NODE_ENV !== 'test') {
+  await seedChatDatabase();
   server.listen(PORT, () => {
     console.log(`[Server] ChatAbit backend running on http://localhost:${PORT}`);
     console.log(`[Server] DevBot status: ${process.env.GEMINI_API_KEY ? 'Live Gemini AI' : 'Demo Mode (No API key found)'}`);

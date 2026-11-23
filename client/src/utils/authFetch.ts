@@ -7,6 +7,10 @@ export const UNAUTHORIZED_EVENT = 'chitabit:unauthorized';
 const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 const PUBLIC_ENDPOINTS = ['/api/auth/login', '/api/auth/register'];
 
+export function resolveUploadUrl(url: string): string {
+  return url.startsWith('/uploads/') ? `${API_BASE}${url}` : url;
+}
+
 function getPath(input: RequestInfo | URL): string | null {
   try {
     const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;

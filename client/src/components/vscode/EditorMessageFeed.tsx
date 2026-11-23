@@ -1,3 +1,4 @@
+import { resolveUploadUrl } from '../../utils/authFetch';
 import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { Message, User, ActiveChat, LiveDraft } from '../../types';
 import { FileIcon, getLanguageForFileIcon } from '../../utils/fileIcons';
@@ -555,25 +556,25 @@ export const EditorMessageFeed: React.FC<EditorMessageFeedProps> = ({
                       {msg.attachment_type?.startsWith('video/') || msg.attachment_url.match(/\.(mp4|webm|mov)$/i) ? (
                         <video
                           controls
-                          src={msg.attachment_url}
+                          src={resolveUploadUrl(msg.attachment_url)}
                           className="max-h-72 max-w-full rounded border border-[#3c3c3c] light-plus:border-[#e7e7e7]"
                         />
                       ) : msg.attachment_type?.startsWith('image/') ? (
                         <a
-                          href={msg.attachment_url}
+                          href={resolveUploadUrl(msg.attachment_url)}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-block border border-[#3c3c3c] light-plus:border-[#e7e7e7] rounded overflow-hidden"
                         >
                           <img
-                            src={msg.attachment_url}
+                            src={resolveUploadUrl(msg.attachment_url)}
                             alt={msg.attachment_name || 'attachment'}
                             className="max-h-72 object-contain"
                           />
                         </a>
                       ) : (
                         <a
-                          href={msg.attachment_url}
+                          href={resolveUploadUrl(msg.attachment_url)}
                           download={msg.attachment_name || 'file'}
                           target="_blank"
                           rel="noreferrer"

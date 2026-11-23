@@ -8,10 +8,10 @@ import { botService } from '../src/services/botService.js';
 
 const uniq = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
-function makeUser(prefix: string) {
+async function makeUser(prefix: string) {
   const id = `test_${prefix}_${uniq()}`;
   const username = `${prefix}_${uniq()}`.slice(0, 25);
-  dbService.createUser(id, username, null, prefix, '#3b82f6');
+  await dbService.createUser(id, username, null, prefix, '#3b82f6');
   return { id, username, token: signToken({ userId: id, username }) };
 }
 
@@ -46,8 +46,8 @@ describe('Socket authentication', () => {
   });
 
   it('sender is taken from the token, not from senderId in the payload', async () => {
-    const alice = makeUser('salice');
-    const victim = makeUser('svictim');
+    const alice = await makeUser('salice');
+    const victim = await makeUser('svictim');
 
     const s = open(alice.token);
     await new Promise<void>((resolve) => s.on('connect', () => resolve()));
@@ -68,7 +68,7 @@ describe('Socket authentication', () => {
 
   it('DevBot stream uses the event names the client listens for', async () => {
     process.env.GEMINI_API_KEY = ''; // force demo mode: no real API call
-    const u = makeUser('sbot');
+    const u = await makeUser('sbot');
     const s = open(u.token);
     await new Promise<void>((resolve) => s.on('connect', () => resolve()));
     s.emit('user:join', { channelId: 'general' });
@@ -85,14 +85,14 @@ describe('Socket authentication', () => {
   }, 15000);
 
   it('REST edit/delete sends live socket events', async () => {
-    const u = makeUser('srest');
+    const u = await makeUser('srest');
     const s = open(u.token);
     await new Promise<void>((resolve) => s.on('connect', () => resolve()));
     s.emit('user:join', { channelId: 'general' });
     await wait(100);
 
     const msgId = `test_rest_${uniq()}`;
-    dbService.createMessage(msgId, 'general', null, u.id, u.username, 'before');
+    await dbService.createMessage(msgId, 'general', null, u.id, u.username, 'before');
 
     const edited = new Promise<any>((resolve) => s.on('message:edited', resolve));
     await fetch(`${url}/api/messages/${msgId}`, {
@@ -111,8 +111,8 @@ describe('Socket authentication', () => {
   });
 
   it('friend requests are pushed live to the other user', async () => {
-    const a = makeUser('lfa');
-    const b = makeUser('lfb');
+    const a = await makeUser('lfa');
+    const b = await makeUser('lfb');
     const sb = open(b.token);
     const sa = open(a.token);
     await Promise.all([sa, sb].map((s) => new Promise<void>((r) => s.on('connect', () => r()))));
@@ -128,7 +128,7 @@ describe('Socket authentication', () => {
     });
     expect((await received).fromUserId).toBe(a.id);
 
-    const reqId = dbService.getFriendRequests(b.id).incoming[0].id;
+    const reqId = (await dbService.getFriendRequests(b.id)).incoming[0].id;
     const accepted = new Promise<any>((resolve) => sa.on('friend_request:accepted', resolve));
     await fetch(`${url}/api/friends/respond`, {
       method: 'POST',
@@ -143,7 +143,7 @@ describe('Socket authentication', () => {
     process.env.DEVBOT_MAX_PER_MINUTE = '1';
     const spy = vi.spyOn(botService, 'streamReply');
     try {
-      const u = makeUser('sdup');
+      const u = await makeUser('sdup');
       const s = open(u.token);
       await new Promise<void>((resolve) => s.on('connect', () => resolve()));
       s.emit('user:join', {});
@@ -171,7 +171,7 @@ describe('Socket authentication', () => {
 
   it('a repeated user:join keeps the open chat, so DevBot answers watched live are not unread', async () => {
     process.env.GEMINI_API_KEY = '';
-    const u = makeUser('sview');
+    const u = await makeUser('sview');
     const s = open(u.token);
     await new Promise<void>((resolve) => s.on('connect', () => resolve()));
     s.emit('user:join', { channelId: 'general' });
@@ -184,17 +184,17 @@ describe('Socket authentication', () => {
     await done;
     await wait(50);
 
-    expect(dbService.getUnreadCounts(u.id).devbot).toBeUndefined();
+    expect((await dbService.getUnreadCounts(u.id)).devbot).toBeUndefined();
 
     // And a #general message while we sit in the DevBot DM IS unread
-    const other = makeUser('sother');
+    const other = await makeUser('sother');
     await wait(5);
-    dbService.createMessage(`test_v_${uniq()}`, 'general', null, other.id, other.username, 'ping');
-    expect(dbService.getUnreadCounts(u.id).general).toBe(1);
+    await dbService.createMessage(`test_v_${uniq()}`, 'general', null, other.id, other.username, 'ping');
+    expect((await dbService.getUnreadCounts(u.id)).general).toBe(1);
   }, 15000);
 
   it('bad input does not crash the server', async () => {
-    const u = makeUser('scrash');
+    const u = await makeUser('scrash');
     const s = open(u.token);
     await new Promise<void>((resolve) => s.on('connect', () => resolve()));
     s.emit('user:join', { channelId: 'general' });

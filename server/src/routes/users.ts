@@ -1,3 +1,4 @@
+import { asyncRoute } from '../middleware/asyncRoute.js';
 import { Router, Request, Response } from 'express';
 import { dbService } from '../db/index.js';
 import { toPublicUser } from '../utils/userDto.js';
@@ -7,12 +8,12 @@ import { requireAuth, authUserId } from '../middleware/auth.js';
 const router = Router();
 router.use(requireAuth);
 
-router.get('/', (_req: Request, res: Response): void => {
-  res.json({ users: dbService.getAllUsers().map(toPublicUser) });
-});
+router.get('/', asyncRoute(async (_req: Request, res: Response) => {
+  res.json({ users: (await dbService.getAllUsers()).map(toPublicUser) });
+}));
 
 // Only your own status/bio can be changed
-router.put('/:id/status', (req: Request, res: Response): void => {
+router.put('/:id/status', asyncRoute(async (req: Request, res: Response) => {
   const { id } = req.params;
   if (id !== authUserId(req)) {
     res.status(403).json({ error: 'You can only update your own status' });
@@ -23,24 +24,24 @@ router.put('/:id/status', (req: Request, res: Response): void => {
   const cleanStatus = typeof status === 'string' ? sanitizeText(status).slice(0, 50) : undefined;
   const cleanBio = typeof bio === 'string' ? sanitizeText(bio).slice(0, 200) : undefined;
 
-  const updated = dbService.updateUserStatus(id, cleanStatus, cleanBio);
+  const updated = await dbService.updateUserStatus(id, cleanStatus, cleanBio);
   if (!updated) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
   res.json({ user: toPublicUser(updated) });
-});
+}));
 
 // Look up an existing user to DM. It no longer creates accounts:
 // that let anyone create (and then log into) accounts with no password.
-router.post('/start-dm', (req: Request, res: Response): void => {
+router.post('/start-dm', asyncRoute(async (req: Request, res: Response) => {
   const { username } = req.body ?? {};
   if (typeof username !== 'string' || !username.trim()) {
     res.status(400).json({ error: 'Username is required' });
     return;
   }
   const cleanUsername = username.trim().toLowerCase().replace(/^@/, '');
-  const user = dbService.getUserByUsername(cleanUsername);
+  const user = await dbService.getUserByUsername(cleanUsername);
 
   if (!user) {
     res.status(404).json({ error: `User @${cleanUsername} does not exist` });
@@ -48,6 +49,6 @@ router.post('/start-dm', (req: Request, res: Response): void => {
   }
 
   res.json({ user: toPublicUser(user) });
-});
+}));
 
 export default router;

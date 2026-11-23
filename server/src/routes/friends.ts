@@ -1,3 +1,4 @@
+import { asyncRoute } from '../middleware/asyncRoute.js';
 import { Router, Request, Response } from 'express';
 import { dbService } from '../db/index.js';
 import { requireAuth, authUserId } from '../middleware/auth.js';
@@ -12,20 +13,20 @@ router.use(requireAuth);
 const getUserId = (req: Request): string => authUserId(req);
 
 // 1. Get confirmed friends list for current user
-router.get('/', (req: Request, res: Response): void => {
+router.get('/', asyncRoute(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   if (!userId) {
     res.status(401).json({ error: 'Unauthorized: No user identified' });
     return;
   }
 
-  const friends = dbService.getFriends(userId).map(toPublicUser);
+  const friends = (await dbService.getFriends(userId)).map(toPublicUser);
 
   res.json({ friends });
-});
+}));
 
 // 2. Search users to add as friends
-router.get('/search', (req: Request, res: Response): void => {
+router.get('/search', asyncRoute(async (req: Request, res: Response) => {
   const query = typeof req.query.q === 'string' ? req.query.q.slice(0, 50) : '';
   const currentUserId = getUserId(req);
 
@@ -34,28 +35,29 @@ router.get('/search', (req: Request, res: Response): void => {
     return;
   }
 
-  const matches = dbService.searchUsers(query, currentUserId).map((u) => ({
+  const users = await dbService.searchUsers(query, currentUserId);
+  const matches = users.map((u) => ({
     ...toPublicUser(u),
-    isFriend: dbService.isFriend(currentUserId, u.id),
+    isFriend: u.is_friend,
   }));
 
   res.json({ users: matches });
-});
+}));
 
 // 3. Get pending friend requests (incoming & outgoing)
-router.get('/requests', (req: Request, res: Response): void => {
+router.get('/requests', asyncRoute(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   if (!userId) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
 
-  const requests = dbService.getFriendRequests(userId);
+  const requests = await dbService.getFriendRequests(userId);
   res.json(requests);
-});
+}));
 
 // 4. Send friend request (or add directly)
-router.post('/request', (req: Request, res: Response): void => {
+router.post('/request', asyncRoute(async (req: Request, res: Response) => {
   const senderId = getUserId(req);
   const { targetUsername, targetUserId } = req.body ?? {};
 
@@ -64,10 +66,10 @@ router.post('/request', (req: Request, res: Response): void => {
     return;
   }
 
-  let receiver = typeof targetUserId === 'string' ? dbService.getUserById(targetUserId) : undefined;
+  let receiver = typeof targetUserId === 'string' ? await dbService.getUserById(targetUserId) : undefined;
   if (!receiver && typeof targetUsername === 'string') {
     const clean = targetUsername.trim().toLowerCase().replace(/^@/, '');
-    receiver = dbService.getUserByUsername(clean);
+    receiver = await dbService.getUserByUsername(clean);
   }
 
   if (!receiver) {
@@ -82,12 +84,12 @@ router.post('/request', (req: Request, res: Response): void => {
 
   if (receiver.id === 'devbot') {
     // DevBot is always accessible, auto-add as friend
-    dbService.addFriend(senderId, 'devbot');
+    await dbService.addFriend(senderId, 'devbot');
     res.json({ success: true, message: 'DevBot added to your contacts!' });
     return;
   }
 
-  const result = dbService.createFriendRequest(senderId, receiver.id);
+  const result = await dbService.createFriendRequest(senderId, receiver.id);
   if (!result.success) {
     res.status(400).json({ error: result.error });
     return;
@@ -106,10 +108,10 @@ router.post('/request', (req: Request, res: Response): void => {
     autoAccepted: Boolean(result.autoAccepted),
     message: result.autoAccepted ? 'You are now friends!' : 'Friend request sent',
   });
-});
+}));
 
 // 5. Accept or decline friend request
-router.post('/respond', (req: Request, res: Response): void => {
+router.post('/respond', asyncRoute(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const { requestId, action } = req.body ?? {}; // action: 'accept' | 'decline'
 
@@ -123,7 +125,7 @@ router.post('/respond', (req: Request, res: Response): void => {
     return;
   }
 
-  const result = dbService.respondToFriendRequest(requestId, userId, action);
+  const result = await dbService.respondToFriendRequest(requestId, userId, action);
   if (!result.success) {
     res.status(400).json({ error: result.error });
     return;
@@ -135,10 +137,10 @@ router.post('/respond', (req: Request, res: Response): void => {
   }
 
   res.json({ success: true, action });
-});
+}));
 
 // 6. Remove friend
-router.delete('/:friendId', (req: Request, res: Response): void => {
+router.delete('/:friendId', asyncRoute(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const { friendId } = req.params;
 
@@ -147,8 +149,8 @@ router.delete('/:friendId', (req: Request, res: Response): void => {
     return;
   }
 
-  dbService.removeFriend(userId, friendId);
+  await dbService.removeFriend(userId, friendId);
   res.json({ success: true });
-});
+}));
 
 export default router;

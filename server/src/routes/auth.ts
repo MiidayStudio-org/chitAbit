@@ -1,5 +1,7 @@
+import { asyncRoute } from '../middleware/asyncRoute.js';
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
+import { verifyPassword } from '../utils/passwords.js';
 import { dbService } from '../db/index.js';
 import { toUserDTO, toPublicUser } from '../utils/userDto.js';
 import { validateUsername, sanitizeText } from '../middleware/sanitize.js';
@@ -47,7 +49,7 @@ function isValidPassword(password: unknown): password is string {
 }
 
 // 1. Register with username, password, and optional displayName
-router.post('/register', authLimiter, async (req: Request, res: Response): Promise<void> => {
+router.post('/register', authLimiter, asyncRoute(async (req: Request, res: Response) => {
   const { username, password, displayName } = req.body ?? {};
 
   const validation = validateUsername(username);
@@ -62,27 +64,26 @@ router.post('/register', authLimiter, async (req: Request, res: Response): Promi
   }
 
   const cleanUsername = username.trim().toLowerCase();
-  if (dbService.getUserByUsername(cleanUsername)) {
-    res.status(409).json({ error: 'Username is already taken' });
-    return;
-  }
-
   const passwordHash = await bcrypt.hash(password, 10);
   const id = `user_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const cleanDisplayName =
     typeof displayName === 'string' ? sanitizeText(displayName).slice(0, 50) : '';
   const finalDisplayName = cleanDisplayName || username.trim();
 
-  const user = dbService.createUser(id, cleanUsername, passwordHash, finalDisplayName, getRandomColor(cleanUsername));
+  const user = await dbService.createUser(id, cleanUsername, passwordHash, finalDisplayName, getRandomColor(cleanUsername));
 
+  if (!user) {
+    res.status(409).json({ error: 'Username is already taken' });
+    return;
+  }
   res.status(201).json({
     token: signToken({ userId: user.id, username: user.username }),
     user: toUserDTO(user),
   });
-});
+}));
 
 // 2. Login with username & password
-router.post('/login', authLimiter, async (req: Request, res: Response): Promise<void> => {
+router.post('/login', authLimiter, asyncRoute(async (req: Request, res: Response) => {
   const { username, password } = req.body ?? {};
 
   if (typeof username !== 'string' || !username.trim()) {
@@ -94,14 +95,14 @@ router.post('/login', authLimiter, async (req: Request, res: Response): Promise<
     return;
   }
 
-  const user = dbService.getUserByUsername(username.trim());
+  const user = await dbService.getUserByUsername(username.trim());
   if (!user || user.is_bot) {
     res.status(401).json({ error: 'Invalid username or password' });
     return;
   }
 
   if (user.password_hash) {
-    const isMatch = await bcrypt.compare(password, user.password_hash);
+    const isMatch = await verifyPassword(password, user.password_hash);
     if (!isMatch) {
       res.status(401).json({ error: 'Invalid username or password' });
       return;
@@ -112,24 +113,31 @@ router.post('/login', authLimiter, async (req: Request, res: Response): Promise<
       res.status(400).json({ error: `Set a password of ${PASSWORD_MIN}-${PASSWORD_MAX} characters for this account` });
       return;
     }
-    dbService.setPasswordHash(user.id, await bcrypt.hash(password, 10));
+    const set = await dbService.setPasswordHash(user.id, await bcrypt.hash(password, 10));
+    if (!set) {
+      const updated = await dbService.getUserById(user.id);
+      if (!updated?.password_hash || !await verifyPassword(password, updated.password_hash)) {
+        res.status(401).json({ error: 'Invalid username or password' });
+        return;
+      }
+    }
   }
 
   res.json({
     token: signToken({ userId: user.id, username: user.username }),
     user: toUserDTO(user),
   });
-});
+}));
 
 // 3. Get currently authenticated user profile
-router.get('/me', requireAuth, (req: Request, res: Response): void => {
-  const user = dbService.getUserById(authUserId(req));
+router.get('/me', requireAuth, asyncRoute(async (req: Request, res: Response) => {
+  const user = await dbService.getUserById(authUserId(req));
   if (!user) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
   res.json({ user: toUserDTO(user) });
-});
+}));
 
 // Returns the cleaned value, undefined (= leave unchanged), or throws on invalid input
 function textField(value: unknown, name: string, max: number, allowEmpty = true): string | undefined {
@@ -148,7 +156,7 @@ function patternField(value: unknown, name: string, pattern: RegExp): string | u
 }
 
 // 4. Update own profile
-router.put('/profile', requireAuth, (req: Request, res: Response): void => {
+router.put('/profile', requireAuth, asyncRoute(async (req: Request, res: Response) => {
   const body = req.body ?? {};
 
   let updates;
@@ -176,23 +184,23 @@ router.put('/profile', requireAuth, (req: Request, res: Response): void => {
     return;
   }
 
-  const updated = dbService.updateUserProfile(authUserId(req), updates);
+  const updated = await dbService.updateUserProfile(authUserId(req), updates);
   if (!updated) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
   res.json({ user: toUserDTO(updated) });
-});
+}));
 
 // Public profile of any user (no private settings)
-router.get('/me/:id', (req: Request, res: Response): void => {
-  const user = dbService.getUserById(req.params.id);
+router.get('/me/:id', asyncRoute(async (req: Request, res: Response) => {
+  const user = await dbService.getUserById(req.params.id);
   if (!user) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
   const { id, username, displayName, avatarColor, avatarUrl, bio, status, isBot, createdAt } = toPublicUser(user);
   res.json({ user: { id, username, displayName, avatarColor, avatarUrl, bio, status, isBot, createdAt } });
-});
+}));
 
 export default router;

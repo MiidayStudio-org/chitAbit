@@ -43,17 +43,17 @@ export function signToken(payload: AuthPayload): string {
 }
 
 // Returns the payload only if the token is valid AND the user still exists.
-export function verifyToken(token: unknown): AuthPayload | null {
-  if (!token || typeof token !== 'string') return null;
+export async function verifyToken(token: unknown): Promise<AuthPayload | null> {
+  if (typeof token !== 'string' || !token) return null;
+  let decoded;
   try {
-    const decoded = jwt.verify(token, getJwtSecret()) as Partial<AuthPayload>;
-    if (!decoded.userId) return null;
-    const user = dbService.getUserById(decoded.userId);
-    if (!user) return null;
-    return { userId: user.id, username: user.username };
+    decoded = jwt.verify(token, getJwtSecret());
   } catch {
     return null;
   }
+  if (typeof decoded !== 'object' || typeof decoded.userId !== 'string') return null;
+  const user = await dbService.getUserById(decoded.userId);
+  return user ? { userId: user.id, username: user.username } : null;
 }
 
 export function getBearerToken(req: Request): string | null {
@@ -63,13 +63,14 @@ export function getBearerToken(req: Request): string | null {
 }
 
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const auth = verifyToken(getBearerToken(req));
-  if (!auth) {
-    res.status(401).json({ error: 'Unauthorized: missing or invalid token' });
-    return;
-  }
-  req.auth = auth;
-  next();
+  void verifyToken(getBearerToken(req)).then((auth) => {
+    if (!auth) {
+      res.status(401).json({ error: 'Unauthorized: missing or invalid token' });
+      return;
+    }
+    req.auth = auth;
+    next();
+  }).catch(next);
 }
 
 // Use only after requireAuth.

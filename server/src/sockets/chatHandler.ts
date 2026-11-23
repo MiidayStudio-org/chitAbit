@@ -86,15 +86,15 @@ function isId(value: unknown, max = 100): value is string {
 }
 
 // Works out where a message/draft is going, and checks the channel or user exists.
-function resolveTarget(
+async function resolveTarget(
   channelId: unknown,
   dmRecipientId: unknown
-): { channelId: string | null; dmRecipientId: string | null } | null {
+): Promise<{ channelId: string | null; dmRecipientId: string | null } | null> {
   if (isId(channelId)) {
-    return dbService.getChannelById(channelId) ? { channelId, dmRecipientId: null } : null;
+    return await dbService.getChannelById(channelId) ? { channelId, dmRecipientId: null } : null;
   }
   if (isId(dmRecipientId)) {
-    return dbService.getUserById(dmRecipientId) ? { channelId: null, dmRecipientId } : null;
+    return await dbService.getUserById(dmRecipientId) ? { channelId: null, dmRecipientId } : null;
   }
   return null;
 }
@@ -118,42 +118,45 @@ export function emitToMessageAudience(io: Server, msg: MessageWithReactions, eve
 export function registerChatHandlers(io: Server) {
   // Every socket must send a valid JWT: io('/', { auth: { token } })
   io.use((socket, next) => {
-    const auth = verifyToken(socket.handshake.auth?.token);
-    if (!auth) {
-      next(new Error('Unauthorized'));
-      return;
-    }
-    socket.data.auth = auth;
-    next();
+    void verifyToken(socket.handshake.auth?.token).then((auth) => {
+      if (!auth) {
+        next(new Error('Unauthorized'));
+        return;
+      }
+      socket.data.auth = auth;
+      next();
+    }).catch(() => next(new Error('Could not verify session')));
   });
 
   io.on('connection', (socket: Socket) => {
     // The only trusted identity. Never use userId/senderId sent by the client.
     const me = socket.data.auth as AuthPayload;
 
-    // Wraps handlers so bad input or a DB error can't crash the whole server.
+    // Process events from one socket in order, including joins and switches.
+    let pending = Promise.resolve();
     const on = <T extends object>(event: string, handler: (data: Partial<T>) => void | Promise<void>) => {
-      socket.on(event, async (data: unknown) => {
+      socket.on(event, (data: unknown) => {
         if (data !== undefined && (data === null || typeof data !== 'object')) return;
-        try {
-          await handler((data ?? {}) as Partial<T>);
-        } catch (err) {
-          console.error(`[Socket] "${event}" failed for ${me.userId}:`, err);
+        pending = pending.then(async () => {
+          if (socket.connected) await handler((data ?? {}) as Partial<T>);
+        }).catch(() => {
+          console.error(`[Socket] "${event}" failed for ${me.userId}`);
           socket.emit('error', { message: 'Something went wrong handling your request' });
-        }
+        });
       });
     };
 
     // 1. User Join / Announce (profile always comes from the DB, not the client)
-    on<{ channelId: string }>('user:join', (data) => {
-      const user = dbService.getUserById(me.userId);
+    on<{ channelId: string }>('user:join', async (data) => {
+      const user = await dbService.getUserById(me.userId);
       if (!user) return;
 
       // A repeated user:join on the same socket only refreshes the profile; it must
       // not reset which chat is open (channel:switch / dm:switch own that).
       const previous = socket.data.user as OnlineUser | undefined;
-      const initialChannel =
-        isId(data.channelId) && dbService.getChannelById(data.channelId) ? data.channelId : 'general';
+      const channels = await dbService.getChannels();
+      const initialChannel = channels.find(({ id }) => id === data.channelId)?.id ?? 'general';
+      if (!socket.connected) return;
 
       const onlineUser: OnlineUser = {
         socketId: socket.id,
@@ -171,11 +174,9 @@ export function registerChatHandlers(io: Server) {
 
       // Join every channel room (not only the open one) so messages in other
       // channels still reach the client and its unread badges update live.
-      for (const ch of dbService.getChannels()) {
-        socket.join(`channel:${ch.id}`);
-      }
-      socket.join(`user:${user.id}`); // private room for DMs & notifications
-      if (!previous) dbService.markChannelRead(user.id, initialChannel);
+      await socket.join([...channels.map(({ id }) => `channel:${id}`), `user:${user.id}`]);
+      if (!previous) await dbService.markChannelRead(user.id, initialChannel);
+      if (!socket.connected) return;
 
       const channelDrafts = Array.from(activeDrafts.values()).filter(
         (d) => d.channelId === initialChannel && d.senderId !== user.id
@@ -188,9 +189,10 @@ export function registerChatHandlers(io: Server) {
     });
 
     // 2. Switch Channel
-    on<{ channelId: string; previousChannelId: string }>('channel:switch', (data) => {
+    on<{ channelId: string; previousChannelId: string }>('channel:switch', async (data) => {
       if (!socket.data.user) return;
-      if (!isId(data.channelId) || !dbService.getChannelById(data.channelId)) return;
+      if (!isId(data.channelId) || !(await dbService.getChannelById(data.channelId))) return;
+      if (!socket.connected) return;
 
       if (isId(data.previousChannelId)) {
         socket.leave(`channel:${data.previousChannelId}`);
@@ -199,7 +201,7 @@ export function registerChatHandlers(io: Server) {
       socket.join(`channel:${data.channelId}`);
       socket.data.user.channelId = data.channelId;
       socket.data.user.dmRecipientId = null;
-      dbService.markChannelRead(me.userId, data.channelId);
+      await dbService.markChannelRead(me.userId, data.channelId);
 
       const channelDrafts = Array.from(activeDrafts.values()).filter(
         (d) => d.channelId === data.channelId && d.senderId !== me.userId
@@ -231,151 +233,17 @@ export function registerChatHandlers(io: Server) {
       broadcastPresence(io);
     });
 
-    // 4. Send Message (with optional attachment)
-    on<{
-      channelId: string | null;
-      dmRecipientId: string | null;
-      content: string;
-      messageLanguage: string | null;
-      attachmentUrl: string | null;
-      attachmentType: string | null;
-      attachmentName: string | null;
-      attachmentSize: number | null;
-    }>('message:send', async (data) => {
-      const sender = dbService.getUserById(me.userId);
-      if (!sender) {
-        socket.emit('error', { message: 'Invalid sender profile' });
-        return;
-      }
-
-      const target = resolveTarget(data.channelId, data.dmRecipientId);
-      if (!target) {
-        socket.emit('error', { message: 'Unknown channel or recipient' });
-        return;
-      }
-
-      const rawContent = typeof data.content === 'string' ? data.content : '';
-      if (rawContent.length > MAX_MESSAGE_LENGTH) {
-        socket.emit('error', { message: `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)` });
-        return;
-      }
-
-      // Attachments must point at a file we stored ourselves (no javascript: or external URLs)
-      let attachment: { url: string; type: string; name: string; size: number | null } | null = null;
-      if (data.attachmentUrl) {
-        if (typeof data.attachmentUrl !== 'string' || !UPLOAD_URL_PATTERN.test(data.attachmentUrl)) {
-          socket.emit('error', { message: 'Invalid attachment' });
-          return;
-        }
-        attachment = {
-          url: data.attachmentUrl,
-          type: data.attachmentType === 'image' ? 'image' : 'file',
-          name: sanitizeText(String(data.attachmentName || 'file')).slice(0, 255) || 'file',
-          size: typeof data.attachmentSize === 'number' && data.attachmentSize >= 0 ? data.attachmentSize : null,
-        };
-      }
-
-      const rateCheck = checkRateLimit(sender.id);
-      if (!rateCheck.allowed) {
-        socket.emit('message:rate_limit', {
-          message: `Slow down! You are sending messages too quickly. Please wait ${Math.ceil((rateCheck.retryAfterMs || 1000) / 1000)}s.`,
-        });
-        return;
-      }
-
-      const messageLanguage =
-        (typeof data.messageLanguage === 'string' && data.messageLanguage.slice(0, 40)) ||
-        sender.message_language ||
-        'typescript';
-
-      // Separate, stricter limit for DevBot so one user can't burn the Gemini quota
-      const askDevBot = async (triggerMessageId: string, userQuery: string) => {
-        const botCheck = checkBotRateLimit(sender.id);
-        if (!botCheck.allowed) {
-          socket.emit('message:rate_limit', {
-            message: `DevBot needs a break. You can ask again in ${Math.ceil((botCheck.retryAfterMs || 1000) / 1000)}s.`,
-          });
-          return;
-        }
-        await handleDevBotResponse({
-          io,
-          ...target,
-          userQuery,
-          originatingUserId: sender.id,
-          triggerMessageId,
-        });
-      };
-
-      // Slash commands (only if no attachment)
-      if (!attachment) {
-        const slashResult = parseSlashCommand(rawContent);
-
-        if (slashResult.isCommand) {
-          if (slashResult.isClientOnly && slashResult.command === 'clear') {
-            socket.emit('chat:clear');
-            return;
-          }
-
-          if (slashResult.handledDirectly && slashResult.resultText) {
-            saveAndBroadcastMessage({
-              io,
-              ...target,
-              senderId: sender.id,
-              senderUsername: sender.username,
-              messageLanguage,
-              content: slashResult.resultText,
-            });
-            return;
-          }
-
-          if (slashResult.isDevBotAsk && slashResult.askQuery) {
-            const askQuery = sanitizeText(slashResult.askQuery);
-            const trigger = saveAndBroadcastMessage({
-              io,
-              ...target,
-              senderId: sender.id,
-              senderUsername: sender.username,
-              messageLanguage,
-              content: `/ask ${askQuery}`,
-            });
-
-            await askDevBot(trigger.id, askQuery);
-            return;
-          }
-        }
-      }
-
-      // Normal message
-      const sanitized = sanitizeText(rawContent);
-      if (!sanitized && !attachment) return;
-
-      const saved = saveAndBroadcastMessage({
-        io,
-        ...target,
-        senderId: sender.id,
-        senderUsername: sender.username,
-        messageLanguage,
-        content: sanitized,
-        attachmentUrl: attachment?.url,
-        attachmentType: attachment?.type,
-        attachmentName: attachment?.name,
-        attachmentSize: attachment?.size,
+    on<MessageInput>('message:send', async (data) => {
+      await sendChatMessage(io, me, data, (event, message) => {
+        if (message === undefined) socket.emit(event);
+        else socket.emit(event, { message });
       });
-
-      // DevBot replies on a DM to DevBot, or an @devbot mention
-      const isDmWithDevBot = target.dmRecipientId === 'devbot';
-      const isDevBotMentioned = /@devbot\b/i.test(sanitized);
-
-      if ((isDmWithDevBot || isDevBotMentioned) && sanitized) {
-        const query = sanitized.replace(/@devbot/gi, '').trim() || sanitized;
-        await askDevBot(saved.id, query);
-      }
     });
 
     // 5. Message Read Receipt (the reader is always the logged-in user)
-    on<{ dmSenderId: string }>('message:read', (data) => {
+    on<{ dmSenderId: string }>('message:read', async (data) => {
       if (!isId(data.dmSenderId)) return;
-      const updatedCount = dbService.markDMMessagesAsRead(data.dmSenderId, me.userId);
+      const updatedCount = await dbService.markDMMessagesAsRead(data.dmSenderId, me.userId);
       if (updatedCount > 0) {
         io.to(`user:${data.dmSenderId}`).emit('message:read_receipt', {
           readerId: me.userId,
@@ -385,45 +253,46 @@ export function registerChatHandlers(io: Server) {
     });
 
     // 5b. Mark a channel as read (same as POST /api/messages/read with channelId)
-    on<{ channelId: string }>('channel:read', (data) => {
-      if (!isId(data.channelId) || !dbService.getChannelById(data.channelId)) return;
-      dbService.markChannelRead(me.userId, data.channelId);
+    on<{ channelId: string }>('channel:read', async (data) => {
+      if (!isId(data.channelId) || !(await dbService.getChannelById(data.channelId))) return;
+      if (!socket.connected) return;
+      await dbService.markChannelRead(me.userId, data.channelId);
     });
 
     // 6. Edit Message (only your own)
-    on<{ messageId: string; content: string }>('message:edit', (data) => {
+    on<{ messageId: string; content: string }>('message:edit', async (data) => {
       if (!isId(data.messageId) || typeof data.content !== 'string') return;
       if (data.content.length > MAX_MESSAGE_LENGTH) return;
       const clean = sanitizeText(data.content);
       if (!clean) return;
 
-      const updated = dbService.updateMessage(data.messageId, me.userId, clean);
+      const updated = await dbService.updateMessage(data.messageId, me.userId, clean);
       if (!updated) return;
 
       emitToMessageAudience(io, updated, 'message:edited', updated);
     });
 
     // 7. Delete Message (only your own)
-    on<{ messageId: string }>('message:delete', (data) => {
+    on<{ messageId: string }>('message:delete', async (data) => {
       if (!isId(data.messageId)) return;
-      const msg = dbService.getMessageById(data.messageId);
+      const msg = await dbService.getMessageById(data.messageId);
       if (!msg || msg.sender_id !== me.userId) return;
 
-      const success = dbService.deleteMessage(data.messageId, me.userId);
+      const success = await dbService.deleteMessage(data.messageId, me.userId);
       if (!success) return;
 
       emitToMessageAudience(io, msg, 'message:deleted', { id: msg.id });
     });
 
     // 8. Toggle Reaction (message must exist and be visible to you)
-    on<{ messageId: string; emoji: string }>('reaction:toggle', (data) => {
+    on<{ messageId: string; emoji: string }>('reaction:toggle', async (data) => {
       if (!isId(data.messageId) || typeof data.emoji !== 'string') return;
       if (!EMOJI_PATTERN.test(data.emoji)) return;
 
-      const msg = dbService.getMessageById(data.messageId);
+      const msg = await dbService.getMessageById(data.messageId);
       if (!msg || !canAccessMessage(msg, me.userId)) return;
 
-      const reactions = dbService.toggleReaction(data.messageId, me.userId, data.emoji);
+      const reactions = await dbService.toggleReaction(data.messageId, me.userId, data.emoji);
       emitToMessageAudience(io, msg, 'reaction:updated', { messageId: data.messageId, reactions });
     });
 
@@ -453,9 +322,9 @@ export function registerChatHandlers(io: Server) {
       text: string;
       cursorPos: number;
       messageLanguage: string;
-    }>('draft:update', (data) => {
+    }>('draft:update', async (data) => {
       if (!socket.data.user) return;
-      const sender = dbService.getUserById(me.userId);
+      const sender = await dbService.getUserById(me.userId);
       if (!sender) return;
 
       // Opt-out check: user disabled live typing
@@ -469,8 +338,8 @@ export function registerChatHandlers(io: Server) {
 
       if (!checkDraftRateLimit(sender.id)) return;
 
-      const target = resolveTarget(data.channelId, data.dmRecipientId);
-      if (!target || target.dmRecipientId === sender.id) return;
+      const target = await resolveTarget(data.channelId, data.dmRecipientId);
+      if (!target || target.dmRecipientId === sender.id || !socket.connected) return;
 
       const text = sanitizeDraftText(data.text.slice(0, 4000));
 
@@ -517,7 +386,154 @@ export function registerChatHandlers(io: Server) {
   });
 }
 
-function saveAndBroadcastMessage(params: {
+interface MessageInput {
+  channelId: string | null;
+  dmRecipientId: string | null;
+  content: string;
+  messageLanguage: string | null;
+  attachmentUrl: string | null;
+  attachmentType: string | null;
+  attachmentName: string | null;
+  attachmentSize: number | null;
+}
+
+export async function sendChatMessage(
+  io: Server,
+  me: AuthPayload,
+  data: Partial<MessageInput>,
+  notify: (event: 'error' | 'message:rate_limit' | 'chat:clear', message?: string) => void,
+): Promise<MessageWithReactions | undefined> {
+  const sender = await dbService.getUserById(me.userId);
+  if (!sender) {
+    notify('error', 'Invalid sender profile');
+    return;
+  }
+
+  const target = await resolveTarget(data.channelId, data.dmRecipientId);
+  if (!target) {
+    notify('error', 'Unknown channel or recipient');
+    return;
+  }
+
+  const rawContent = typeof data.content === 'string' ? data.content : '';
+  if (rawContent.length > MAX_MESSAGE_LENGTH) {
+    notify('error', `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`);
+    return;
+  }
+
+  // Attachments must point at a file we stored ourselves (no javascript: or external URLs)
+  let attachment: { url: string; type: string; name: string; size: number | null } | null = null;
+  if (data.attachmentUrl) {
+    if (typeof data.attachmentUrl !== 'string' || !UPLOAD_URL_PATTERN.test(data.attachmentUrl)) {
+      notify('error', 'Invalid attachment');
+      return;
+    }
+    attachment = {
+      url: data.attachmentUrl,
+      type: data.attachmentType === 'image' ? 'image' : 'file',
+      name: sanitizeText(String(data.attachmentName || 'file')).slice(0, 255) || 'file',
+      size: typeof data.attachmentSize === 'number' && Number.isInteger(data.attachmentSize) &&
+        data.attachmentSize >= 0 && data.attachmentSize <= 2_147_483_647 ? data.attachmentSize : null,
+    };
+  }
+
+  const rateCheck = checkRateLimit(sender.id);
+  if (!rateCheck.allowed) {
+    notify('message:rate_limit', `Slow down! You are sending messages too quickly. Please wait ${Math.ceil((rateCheck.retryAfterMs || 1000) / 1000)}s.`);
+    return;
+  }
+
+  const messageLanguage =
+    (typeof data.messageLanguage === 'string' && data.messageLanguage.slice(0, 40)) ||
+    sender.message_language ||
+    'typescript';
+
+  // Separate, stricter limit for DevBot so one user can't burn the Gemini quota
+  const askDevBot = (triggerMessageId: string, userQuery: string) => {
+    const botCheck = checkBotRateLimit(sender.id);
+    if (!botCheck.allowed) {
+      notify('message:rate_limit', `DevBot needs a break. You can ask again in ${Math.ceil((botCheck.retryAfterMs || 1000) / 1000)}s.`);
+      return;
+    }
+    void handleDevBotResponse({
+      io,
+      ...target,
+      userQuery,
+      originatingUserId: sender.id,
+      triggerMessageId,
+    }).catch(() => {
+      console.error('[Socket] Could not complete DevBot response');
+      notify('error', 'Could not complete DevBot response');
+    });
+  };
+
+  // Slash commands (only if no attachment)
+  if (!attachment) {
+    const slashResult = parseSlashCommand(rawContent);
+
+    if (slashResult.isCommand) {
+      if (slashResult.isClientOnly && slashResult.command === 'clear') {
+        notify('chat:clear');
+        return;
+      }
+
+      if (slashResult.handledDirectly && slashResult.resultText) {
+        return saveAndBroadcastMessage({
+          io,
+          ...target,
+          senderId: sender.id,
+          senderUsername: sender.username,
+          messageLanguage,
+          content: slashResult.resultText,
+        });
+      }
+
+      if (slashResult.isDevBotAsk && slashResult.askQuery) {
+        const askQuery = sanitizeText(slashResult.askQuery);
+        const trigger = await saveAndBroadcastMessage({
+          io,
+          ...target,
+          senderId: sender.id,
+          senderUsername: sender.username,
+          messageLanguage,
+          content: `/ask ${askQuery}`,
+        });
+
+        askDevBot(trigger.id, askQuery);
+        return trigger;
+      }
+    }
+  }
+
+  // Normal message
+  const sanitized = sanitizeText(rawContent);
+  if (!sanitized && !attachment) return;
+
+  const saved = await saveAndBroadcastMessage({
+    io,
+    ...target,
+    senderId: sender.id,
+    senderUsername: sender.username,
+    messageLanguage,
+    content: sanitized,
+    attachmentUrl: attachment?.url,
+    attachmentType: attachment?.type,
+    attachmentName: attachment?.name,
+    attachmentSize: attachment?.size,
+  });
+
+  // DevBot replies on a DM to DevBot, or an @devbot mention
+  const isDmWithDevBot = target.dmRecipientId === 'devbot';
+  const isDevBotMentioned = /@devbot\b/i.test(sanitized);
+
+  if ((isDmWithDevBot || isDevBotMentioned) && sanitized) {
+    const query = sanitized.replace(/@devbot/gi, '').trim() || sanitized;
+    askDevBot(saved.id, query);
+  }
+  return saved;
+}
+
+async function saveAndBroadcastMessage(params: {
   io: Server;
   channelId: string | null;
   dmRecipientId: string | null;
@@ -529,12 +545,12 @@ function saveAndBroadcastMessage(params: {
   attachmentType?: string | null;
   attachmentName?: string | null;
   attachmentSize?: number | null;
-}): MessageWithReactions {
+}): Promise<MessageWithReactions> {
   // Clear any active draft immediately upon saving/broadcasting real message
   clearUserDraft(params.io, params.senderId, params.channelId, params.dmRecipientId);
 
   const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const message = dbService.createMessage({
+  const message = await dbService.createMessage({
     id: messageId,
     channelId: params.channelId,
     dmRecipientId: params.dmRecipientId,
@@ -550,7 +566,7 @@ function saveAndBroadcastMessage(params: {
 
   if (params.channelId) {
     params.io.to(`channel:${params.channelId}`).emit('message:new', message);
-    markChannelReadForViewers(params.channelId, message.created_at);
+    await markChannelReadForViewers(params.channelId, message.created_at);
   } else if (params.dmRecipientId) {
     params.io.to(`user:${params.senderId}`).emit('message:new', message);
     params.io.to(`user:${params.dmRecipientId}`).emit('message:new', message);
@@ -573,9 +589,9 @@ async function handleDevBotResponse(params: {
 
   // Last 15 messages before the question, for context
   const raw = channelId
-    ? dbService.getChannelMessages(channelId, 16)
+    ? await dbService.getChannelMessages(channelId, 16)
     : dmRecipientId
-      ? dbService.getDMMessages(originatingUserId, 'devbot', 16)
+      ? await dbService.getDMMessages(originatingUserId, 'devbot', 16)
       : [];
   const history = raw
     .filter((m) => m.id !== triggerMessageId)
@@ -598,6 +614,7 @@ async function handleDevBotResponse(params: {
 
   const tempBotMsgId = `bot_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   let accumulated = '';
+  let completedReply: string | undefined;
 
   try {
     await botService.streamReply(userQuery, history, {
@@ -616,30 +633,27 @@ async function handleDevBotResponse(params: {
         });
       },
       onDone(fullText) {
-        const botSaved = dbService.createMessage({
-          id: tempBotMsgId,
-          channelId: channelId || null,
-          dmRecipientId: channelId ? null : originatingUserId,
-          senderId: 'devbot',
-          senderUsername: 'devbot',
-          content: fullText,
-        });
-
-        io.to(targetRoom).emit('bot:stream:end', {
-          tempId: tempBotMsgId,
-          message: botSaved,
-        });
-        if (channelId) {
-          markChannelReadForViewers(channelId, botSaved.created_at);
-        } else if (isViewingDm(originatingUserId, 'devbot')) {
-          // The user watched the answer stream in, so it is not unread
-          dbService.markDMMessagesAsRead('devbot', originatingUserId);
-        }
+        completedReply = fullText;
       },
       onError(err) {
         console.error('[Socket] DevBot error:', err);
       },
     });
+    if (completedReply === undefined) return;
+    const botSaved = await dbService.createMessage({
+      id: tempBotMsgId,
+      channelId: channelId || null,
+      dmRecipientId: channelId ? null : originatingUserId,
+      senderId: 'devbot',
+      senderUsername: 'devbot',
+      content: completedReply,
+    });
+    if (channelId) {
+      await markChannelReadForViewers(channelId, botSaved.created_at);
+    } else if (isViewingDm(originatingUserId, 'devbot')) {
+      await dbService.markDMMessagesAsRead('devbot', originatingUserId);
+    }
+    io.to(targetRoom).emit('bot:stream:end', { tempId: tempBotMsgId, message: botSaved });
   } finally {
     io.to(targetRoom).emit('bot:typing', {
       channelId,
@@ -651,14 +665,12 @@ async function handleDevBotResponse(params: {
 
 // Anyone who has this channel open right now has seen the new message,
 // so it should not count as unread for them.
-function markChannelReadForViewers(channelId: string, at: number) {
+async function markChannelReadForViewers(channelId: string, at: number) {
   const viewers = new Set<string>();
   for (const u of onlineUsers.values()) {
     if (u.channelId === channelId) viewers.add(u.userId);
   }
-  for (const userId of viewers) {
-    dbService.markChannelRead(userId, channelId, at);
-  }
+  await dbService.markChannelReadForUsers([...viewers], channelId, at);
 }
 
 // True if any of the user's open tabs/sockets has this DM open right now

@@ -6,22 +6,22 @@ import { signToken } from '../src/middleware/auth.js';
 
 const uniq = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
-function makeUser(prefix: string) {
+async function makeUser(prefix: string) {
   const id = `test_${prefix}_${uniq()}`;
   const username = `${prefix}_${uniq()}`.slice(0, 25);
-  dbService.createUser(id, username, null, `${prefix} dev`, '#3b82f6');
+  await dbService.createUser(id, username, null, `${prefix} dev`, '#3b82f6');
   return { id, username, token: signToken({ userId: id, username }) };
 }
 
 describe('Message & Channel API Tests', () => {
-  let alice: ReturnType<typeof makeUser>;
-  let bob: ReturnType<typeof makeUser>;
-  let eve: ReturnType<typeof makeUser>;
+  let alice: Awaited<ReturnType<typeof makeUser>>;
+  let bob: Awaited<ReturnType<typeof makeUser>>;
+  let eve: Awaited<ReturnType<typeof makeUser>>;
 
-  beforeAll(() => {
-    alice = makeUser('alice');
-    bob = makeUser('bob');
-    eve = makeUser('eve');
+  beforeAll(async () => {
+    alice = await makeUser('alice');
+    bob = await makeUser('bob');
+    eve = await makeUser('eve');
   });
 
   const auth = (u: { token: string }) => ({ Authorization: `Bearer ${u.token}` });
@@ -53,23 +53,36 @@ describe('Message & Channel API Tests', () => {
     expect(dupRes.status).toBe(409);
   });
 
-  it('Message CRUD and reactions work properly in database', () => {
+  it('sends over HTTP when the socket is disconnected and saves the authenticated sender', async () => {
+    const res = await request(app).post('/api/messages/send').set(auth(alice)).send({
+      dmRecipientId: bob.id,
+      senderId: eve.id,
+      content: 'HTTP fallback',
+      localTempId: 'temp_http',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.message).toMatchObject({ sender_id: alice.id, localTempId: 'temp_http' });
+    const history = await request(app).get(`/api/messages/dm/${alice.id}/${bob.id}`).set(auth(bob));
+    expect(history.body.messages).toContainEqual(expect.objectContaining({ id: res.body.message.id, content: 'HTTP fallback' }));
+  });
+
+  it('Message CRUD and reactions work properly in database', async () => {
     const msgId = `test_msg_${uniq()}`;
-    const msg = dbService.createMessage(msgId, 'general', null, alice.id, alice.username, 'Hello world from test');
+    const msg = await dbService.createMessage(msgId, 'general', null, alice.id, alice.username, 'Hello world from test');
     expect(msg.id).toBe(msgId);
     expect(msg.content).toBe('Hello world from test');
 
-    const updated = dbService.updateMessage(msgId, alice.id, 'Updated content');
+    const updated = await dbService.updateMessage(msgId, alice.id, 'Updated content');
     expect(updated?.content).toBe('Updated content');
     expect(updated?.edited_at).toBeGreaterThan(0);
 
-    const reactions = dbService.toggleReaction(msgId, alice.id, '🚀');
+    const reactions = await dbService.toggleReaction(msgId, alice.id, '🚀');
     expect(reactions.length).toBe(1);
     expect(reactions[0].emoji).toBe('🚀');
     expect(reactions[0].count).toBe(1);
 
-    expect(dbService.deleteMessage(msgId, alice.id)).toBe(true);
-    expect(dbService.getMessageById(msgId)).toBeUndefined();
+    expect(await dbService.deleteMessage(msgId, alice.id)).toBe(true);
+    expect(await dbService.getMessageById(msgId)).toBeUndefined();
   });
 });
 
@@ -92,7 +105,7 @@ describe('Auth & access control', () => {
     const username = `ghost_${uniq()}`.slice(0, 25);
     const res = await request(app).post('/api/auth/login').send({ username });
     expect(res.status).toBe(400);
-    expect(dbService.getUserByUsername(username)).toBeUndefined();
+    expect(await dbService.getUserByUsername(username)).toBeUndefined();
   });
 
   it('protected routes need a valid token', async () => {
@@ -102,17 +115,17 @@ describe('Auth & access control', () => {
   });
 
   it('?userId= no longer lets you act as someone else', async () => {
-    const victim = makeUser('victim');
+    const victim = await makeUser('victim');
     const res = await request(app).get(`/api/friends/requests?userId=${victim.id}`);
     expect(res.status).toBe(401);
   });
 
   it('you cannot read or edit other people\'s DMs', async () => {
-    const a = makeUser('dma');
-    const b = makeUser('dmb');
-    const outsider = makeUser('out');
+    const a = await makeUser('dma');
+    const b = await makeUser('dmb');
+    const outsider = await makeUser('out');
     const msgId = `test_dm_${uniq()}`;
-    dbService.createMessage(msgId, null, b.id, a.id, a.username, 'private hello');
+    await dbService.createMessage(msgId, null, b.id, a.id, a.username, 'private hello');
 
     const asOutsider = await request(app)
       .get(`/api/messages/dm/${a.id}/${b.id}`)
@@ -131,7 +144,7 @@ describe('Auth & access control', () => {
       .set({ Authorization: `Bearer ${outsider.token}` })
       .send({ senderId: a.id, content: 'hacked' });
     expect(edit.status).toBe(404);
-    expect(dbService.getMessageById(msgId)?.content).toBe('private hello');
+    expect((await dbService.getMessageById(msgId))?.content).toBe('private hello');
 
     // Search does not leak other people's DMs
     const search = await request(app)
@@ -141,18 +154,18 @@ describe('Auth & access control', () => {
   });
 
   it('start-dm does not create accounts', async () => {
-    const u = makeUser('dmstart');
+    const u = await makeUser('dmstart');
     const name = `nobody_${uniq()}`.slice(0, 25);
     const res = await request(app)
       .post('/api/users/start-dm')
       .set({ Authorization: `Bearer ${u.token}` })
       .send({ username: name });
     expect(res.status).toBe(404);
-    expect(dbService.getUserByUsername(name)).toBeUndefined();
+    expect(await dbService.getUserByUsername(name)).toBeUndefined();
   });
 
   it('profile rejects javascript: avatar URLs', async () => {
-    const u = makeUser('prof');
+    const u = await makeUser('prof');
     const res = await request(app)
       .put('/api/auth/profile')
       .set({ Authorization: `Bearer ${u.token}` })
@@ -161,7 +174,7 @@ describe('Auth & access control', () => {
   });
 
   it('upload rejects HTML/SVG and requires login', async () => {
-    const u = makeUser('upl');
+    const u = await makeUser('upl');
     const noAuth = await request(app).post('/api/upload').attach('file', Buffer.from('hi'), 'a.txt');
     expect(noAuth.status).toBe(401);
 
