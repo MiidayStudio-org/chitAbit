@@ -6,6 +6,7 @@ import { DualIdentityAvatar } from './DualIdentityAvatar';
 
 export interface StatusBarProps {
   socketConnected: boolean;
+  pollingOnly?: boolean;
   currentUser: User | null;
   activeChat: ActiveChat | null;
   onlineCount: number;
@@ -24,6 +25,7 @@ export interface StatusBarProps {
 
 export const StatusBar: React.FC<StatusBarProps> = ({
   socketConnected,
+  pollingOnly = false,
   currentUser,
   activeChat,
   onlineCount,
@@ -169,13 +171,13 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
         {/* Connection status */}
         <div className="flex items-center gap-1">
-          {socketConnected ? (
+          {socketConnected || pollingOnly ? (
             <Wifi className="w-3 h-3 text-[#89d185]" />
           ) : (
             <WifiOff className="w-3 h-3 text-red-300 animate-pulse" />
           )}
           <span className="hidden sm:inline">
-            {socketConnected ? 'Connected' : 'Reconnecting...'}
+            {pollingOnly ? 'Polling' : socketConnected ? 'Connected' : 'Reconnecting...'}
           </span>
         </div>
 

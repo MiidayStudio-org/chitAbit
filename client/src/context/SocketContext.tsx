@@ -3,6 +3,10 @@ import { io, Socket } from 'socket.io-client';
 import { useAuth } from './AuthContext';
 import { OnlineUser } from '../types';
 
+// An explicit socket origin takes precedence for deployments with a separate Node server.
+export const socketEnabled = Boolean(import.meta.env.VITE_SOCKET_URL) ||
+  import.meta.env.VITE_ENABLE_SOCKET_IO !== 'false';
+
 interface SocketContextType {
   socket: Socket | null;
   isConnected: boolean;
@@ -18,6 +22,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
 
   useEffect(() => {
+    if (!socketEnabled) return;
     // If not logged in, disconnect socket if open
     if (!user) {
       if (socket) {

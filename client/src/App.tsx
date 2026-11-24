@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from './context/AuthContext';
-import { useSocket } from './context/SocketContext';
+import { socketEnabled, useSocket } from './context/SocketContext';
 import { User, Message, LastMessage, ActiveChat, NavigationTab, FriendRequest, OpenTab, LiveDraft, Channel } from './types';
 import { CreateChannelModal } from './components/modals/CreateChannelModal';
 import { channelToChat } from './utils/chatUtils';
@@ -1684,6 +1684,7 @@ export const App: React.FC = () => {
 
       {/* 2. VS Code Status Bar */}
       <StatusBar
+        pollingOnly={!socketEnabled}
         socketConnected={Boolean(socket?.connected)}
         currentUser={user}
         activeChat={activeChat}

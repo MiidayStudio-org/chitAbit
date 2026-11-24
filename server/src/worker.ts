@@ -2,7 +2,6 @@
  * Cloudflare Worker Backend for ChatAbit
  * - Handles REST API endpoints with Cloudflare D1 (SQLite at the edge)
  * - Supports CORS for Cloudflare Pages frontend
- * - Handles WebSocket upgrade requests via native WebSockets
  */
 
 export interface D1PreparedStatement {
@@ -490,17 +489,36 @@ export default {
           )
           .run();
 
-        const saved = await db.prepare(
-          `SELECT m.*, u.display_name AS sender_display_name, u.avatar_color AS sender_avatar_color,
-             u.avatar_url AS sender_avatar_url, u.file_icon AS sender_file_icon,
-             u.message_language AS sender_message_language
-           FROM messages m LEFT JOIN users u ON u.id = m.sender_id
-           WHERE m.id = ? AND m.sender_id = ? AND m.deleted_at IS NULL`
-        ).bind(id, authUser.id).first<{ channel_id: string | null; dm_recipient_id: string | null }>();
-        if (!saved || saved.channel_id !== channelId || saved.dm_recipient_id !== dmRecipientId) {
+        // Older production D1 databases may lack optional profile or soft-delete columns.
+        const [saved, sender] = await Promise.all([
+          db.prepare('SELECT * FROM messages WHERE id = ? AND sender_id = ?')
+            .bind(id, authUser.id).first<{
+              channel_id: string | null;
+              dm_recipient_id: string | null;
+              deleted_at?: number | null;
+              message_language?: string | null;
+            }>(),
+          db.prepare('SELECT * FROM users WHERE id = ?').bind(authUser.id).first<{
+            display_name?: string;
+            avatar_color?: string;
+            avatar_url?: string | null;
+            file_icon?: string;
+            message_language?: string;
+          }>(),
+        ]);
+        if (!saved || saved.deleted_at != null || saved.channel_id !== channelId || saved.dm_recipient_id !== dmRecipientId) {
           return errorResponse('Send ID was already used', 409, cors);
         }
-        const message = { ...saved, reactions: [], localTempId: localTempId ?? null };
+        const message = {
+          ...saved,
+          sender_display_name: sender?.display_name || authUser.username,
+          sender_avatar_color: sender?.avatar_color || '#3b82f6',
+          sender_avatar_url: sender?.avatar_url ?? null,
+          sender_file_icon: sender?.file_icon || 'ts',
+          sender_message_language: sender?.message_language || saved.message_language || 'typescript',
+          reactions: [],
+          localTempId: localTempId ?? null,
+        };
 
         return jsonResponse({ success: true, message }, 201, cors);
       } catch (err: any) {
