@@ -12,8 +12,9 @@ it('acknowledges and deduplicates HTTP sends on a legacy D1 schema', async () =>
     sqlite.exec(`
       CREATE TABLE users (id TEXT PRIMARY KEY, display_name TEXT, avatar_color TEXT);
       INSERT INTO users VALUES ('sender', 'Sender', '#123456');
+      CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT UNIQUE, description TEXT, created_by TEXT, created_at INTEGER);
       CREATE TABLE messages (
-        id TEXT PRIMARY KEY, channel_id TEXT, dm_recipient_id TEXT, sender_id TEXT,
+        id TEXT PRIMARY KEY, channel_id TEXT REFERENCES channels(id), dm_recipient_id TEXT, sender_id TEXT REFERENCES users(id),
         sender_username TEXT, message_language TEXT, content TEXT, attachment_url TEXT,
         attachment_type TEXT, attachment_name TEXT, attachment_size INTEGER, created_at INTEGER
       );
@@ -34,9 +35,9 @@ it('acknowledges and deduplicates HTTP sends on a legacy D1 schema', async () =>
     };
     const secret = 'worker-test-secret';
     const token = jwt.sign({ id: 'sender', username: 'test_sender' }, secret, { expiresIn: '1h' });
-    const send = (channelId = 'javascript') => worker.fetch(new Request('https://example.test/api/messages/send', {
+    const send = (channelId = 'javascript', session = token) => worker.fetch(new Request('https://example.test/api/messages/send', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ channelId, content: 'hello', localTempId: 'temp_test' }),
     }), { chitabit_db: db, JWT_SECRET: secret });
 
@@ -48,6 +49,12 @@ it('acknowledges and deduplicates HTTP sends on a legacy D1 schema', async () =>
     expect(original).toMatchObject({ success: true, message: { content: 'hello', localTempId: 'temp_test' } });
     expect(await retry.json()).toEqual(original);
     expect((await send('general')).status).toBe(409);
+    expect((await send('unknown')).status).toBe(404);
+    const staleToken = jwt.sign({ id: 'missing', username: 'removed_user' }, secret, { expiresIn: '1h' });
+    expect((await send('javascript', staleToken)).status).toBe(401);
+    const channels = await worker.fetch(new Request('https://example.test/api/channels'), { chitabit_db: db, JWT_SECRET: secret });
+    expect((await channels.json()).map(({ id }: { id: string }) => id)).toContain('general');
+    expect(sqlite.prepare('SELECT count(*) AS count FROM channels').get()?.count).toBe(6);
     expect(sqlite.prepare('SELECT count(*) AS count FROM messages').get()?.count).toBe(1);
   } finally {
     sqlite.close();

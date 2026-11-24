@@ -1,3 +1,5 @@
+import { DEFAULT_CHANNELS } from './db/defaultChannels.js';
+
 /**
  * Cloudflare Worker Backend for ChatAbit
  * - Handles REST API endpoints with Cloudflare D1 (SQLite at the edge)
@@ -169,6 +171,19 @@ async function verifyPassword(password: string, storedHash: string): Promise<boo
   }
 }
 
+type WorkerChannel = { id: string; name: string; description: string | null; created_by: string; created_at: number };
+
+async function ensureDefaultChannels(db: D1Database, defaults = DEFAULT_CHANNELS) {
+  if (!defaults.length) return;
+  const now = Date.now();
+  const values = defaults.flatMap(({ id, description }, index) => [id, id, description, 'system', now + index]);
+  const placeholders = defaults.map(() => '(?, ?, ?, ?, ?)').join(', ');
+  await db.prepare(
+    `INSERT INTO channels (id, name, description, created_by, created_at) VALUES ${placeholders}
+     ON CONFLICT DO NOTHING`
+  ).bind(...values).run();
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -320,7 +335,7 @@ export default {
         .bind(authUser.id)
         .first();
 
-      if (!user) return errorResponse('User not found', 404, cors);
+      if (!user) return errorResponse('Session user no longer exists. Sign in again.', 401, cors);
       return jsonResponse(
         {
           user: {
@@ -380,8 +395,15 @@ export default {
     // 4. Channels API
     if (url.pathname === '/api/channels' && request.method === 'GET') {
       if (!db) return errorResponse('Database not initialized', 500, cors);
-      const { results } = await db.prepare('SELECT * FROM channels ORDER BY created_at ASC').all();
-      return jsonResponse(results || [], 200, cors);
+      const list = () => db.prepare('SELECT * FROM channels ORDER BY created_at ASC').all<WorkerChannel>();
+      let { results } = await list();
+      const missing = DEFAULT_CHANNELS.filter(({ id }) =>
+        !results.some((channel) => channel.id === id || channel.name.toLowerCase() === id));
+      if (missing.length) {
+        await ensureDefaultChannels(db, missing);
+        ({ results } = await list());
+      }
+      return jsonResponse(results, 200, cors);
     }
 
     if (url.pathname === '/api/channels' && request.method === 'POST') {
@@ -465,8 +487,36 @@ export default {
           const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', key));
           id = 'msg_send_' + Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
         }
-        const channelId = body.channelId || null;
-        const dmRecipientId = body.dmRecipientId || null;
+        let channelId = typeof body.channelId === 'string' && body.channelId ? body.channelId : null;
+        const dmRecipientId = typeof body.dmRecipientId === 'string' && body.dmRecipientId ? body.dmRecipientId : null;
+        if (Boolean(channelId) === Boolean(dmRecipientId)) {
+          return errorResponse('Choose one channel or DM recipient', 400, cors);
+        }
+
+        const sender = await db.prepare('SELECT * FROM users WHERE id = ?').bind(authUser.id).first<{
+          display_name?: string;
+          avatar_color?: string;
+          avatar_url?: string | null;
+          file_icon?: string;
+          message_language?: string;
+        }>();
+        if (!sender) return errorResponse('Session user no longer exists. Sign in again.', 401, cors);
+
+        if (channelId) {
+          const findChannel = () => db.prepare('SELECT id FROM channels WHERE id = ?').bind(channelId).first<{ id: string }>();
+          let channel = await findChannel();
+          const preset = DEFAULT_CHANNELS.find(({ id }) => id === channelId);
+          if (!channel && preset) {
+            await ensureDefaultChannels(db, [preset]);
+            channel = await findChannel() ?? await db.prepare('SELECT id FROM channels WHERE lower(name) = ?')
+              .bind(preset.id).first<{ id: string }>();
+          }
+          if (!channel) return errorResponse('Channel not found', 404, cors);
+          channelId = channel.id;
+        } else {
+          const recipient = await db.prepare('SELECT id FROM users WHERE id = ?').bind(dmRecipientId).first();
+          if (!recipient) return errorResponse('DM recipient not found', 404, cors);
+        }
         const now = Date.now();
 
         await db.prepare(
@@ -490,22 +540,13 @@ export default {
           .run();
 
         // Older production D1 databases may lack optional profile or soft-delete columns.
-        const [saved, sender] = await Promise.all([
-          db.prepare('SELECT * FROM messages WHERE id = ? AND sender_id = ?')
-            .bind(id, authUser.id).first<{
-              channel_id: string | null;
-              dm_recipient_id: string | null;
-              deleted_at?: number | null;
-              message_language?: string | null;
-            }>(),
-          db.prepare('SELECT * FROM users WHERE id = ?').bind(authUser.id).first<{
-            display_name?: string;
-            avatar_color?: string;
-            avatar_url?: string | null;
-            file_icon?: string;
-            message_language?: string;
-          }>(),
-        ]);
+        const saved = await db.prepare('SELECT * FROM messages WHERE id = ? AND sender_id = ?')
+          .bind(id, authUser.id).first<{
+            channel_id: string | null;
+            dm_recipient_id: string | null;
+            deleted_at?: number | null;
+            message_language?: string | null;
+          }>();
         if (!saved || saved.deleted_at != null || saved.channel_id !== channelId || saved.dm_recipient_id !== dmRecipientId) {
           return errorResponse('Send ID was already used', 409, cors);
         }

@@ -258,13 +258,22 @@ export const App: React.FC = () => {
   }, [user]);
 
   // Fetch all channels
+  const generalChannel = channels.find((channel) => channel.name.toLowerCase() === 'general');
+  const generalChat = generalChannel ? channelToChat(generalChannel) : DEFAULT_TABS[0] as ActiveChat;
+
   const fetchChannels = useCallback(async () => {
     if (!user) return;
     try {
       const res = await fetch('/api/channels');
       const data = await res.json();
-      if (Array.isArray(data.channels)) {
-        setChannels(data.channels);
+      const fetchedChannels = Array.isArray(data) ? data : data.channels;
+      if (Array.isArray(fetchedChannels)) {
+        setChannels(fetchedChannels);
+        const general = fetchedChannels.find((channel: Channel) => channel.name.toLowerCase() === 'general');
+        if (general && general.id !== 'general') {
+          setOpenTabs((previous) => previous.map((tab) => tab.id === 'general' ? { ...tab, id: general.id } : tab));
+          setActiveTabId((previous) => previous === 'general' ? general.id : previous);
+        }
       }
     } catch (err) {
       console.error('Failed to load channels:', err);
@@ -1448,13 +1457,7 @@ export const App: React.FC = () => {
                   {activeChat.id === 'devbot' ? (
                     <DevBotComingSoon
                       onBackToGeneral={() =>
-                        handleSelectChat({
-                          type: 'channel',
-                          id: 'general',
-                          name: 'general',
-                          displayName: 'general',
-                          fileIcon: 'folder',
-                        })
+                        handleSelectChat(generalChat)
                       }
                     />
                   ) : (
@@ -1629,13 +1632,7 @@ export const App: React.FC = () => {
                     <button
                       type="button"
                       onClick={() =>
-                        handleSelectChat({
-                          type: 'channel',
-                          id: 'general',
-                          name: 'general',
-                          displayName: 'general',
-                          fileIcon: 'folder',
-                        })
+                        handleSelectChat(generalChat)
                       }
                       className="px-3 py-1.5 bg-[#007acc] hover:bg-[#0062a3] text-white text-xs rounded font-semibold cursor-pointer transition-colors"
                     >

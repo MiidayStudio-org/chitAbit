@@ -1,3 +1,4 @@
+import { DEFAULT_CHANNELS } from './defaultChannels.js';
 import { fileURLToPath } from 'node:url';
 import { sql, type SQL } from 'drizzle-orm';
 import { createPostgresConnection } from './postgres/client.js';
@@ -48,15 +49,6 @@ async function run(query: SQL, executor = db): Promise<void> {
   await executor.execute(query);
 }
 
-// Default channels are ordered by their creation timestamps.
-export const DEFAULT_CHANNELS: { id: string; description: string }[] = [
-  { id: 'general', description: 'General discussion for all ChatAbit members' },
-  { id: 'javascript', description: 'JavaScript, TypeScript, Node.js and the web' },
-  { id: 'python', description: 'Python, scripting and data tooling' },
-  { id: 'devops', description: 'CI/CD, Docker, cloud and infrastructure' },
-  { id: 'ai-ml', description: 'AI, machine learning and LLMs' },
-  { id: 'help', description: 'Stuck on something? Ask here' },
-];
 export async function seedChatDatabase() {
   const now = Date.now();
   await transaction(async (tx) => {
