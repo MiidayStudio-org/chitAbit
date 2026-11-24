@@ -178,6 +178,19 @@ export const dbService = {
     return get<UserRow>(sql`SELECT * FROM chitabit.users WHERE id = ${id}`);
   },
 
+  async getLiveDraftSender(
+    senderId: string,
+    target: { channelId: string | null; dmRecipientId: string | null },
+  ): Promise<Pick<UserRow, 'id' | 'username' | 'file_icon' | 'message_language'> | undefined> {
+    const destination = target.channelId
+      ? sql`SELECT 1 FROM chitabit.channels WHERE id = ${target.channelId}`
+      : sql`SELECT 1 FROM chitabit.users WHERE id = ${target.dmRecipientId}`;
+    return get<Pick<UserRow, 'id' | 'username' | 'file_icon' | 'message_language'>>(sql`
+      SELECT id, username, file_icon, message_language FROM chitabit.users
+      WHERE id = ${senderId} AND share_live_typing IS DISTINCT FROM 0 AND EXISTS (${destination})
+    `);
+  },
+
   async getUserByUsername(username: string): Promise<UserRow | undefined> {
     return get<UserRow>(sql`SELECT * FROM chitabit.users WHERE lower(username) = lower(${username})`);
   },
@@ -417,7 +430,7 @@ export const dbService = {
   async getUnreadCounts(userId: string): Promise<Record<string, number>> {
     const counts: Record<string, number> = {};
 
-    const channelRows = await all<{ chat_id: string; count: number }>(sql`
+    const rows = await all<{ chat_id: string; count: number }>(sql`
       SELECT m.channel_id AS chat_id, COUNT(*) AS count
       FROM chitabit.messages m
       JOIN chitabit.users me ON me.id = ${userId}
@@ -427,9 +440,7 @@ export const dbService = {
         AND m.sender_id != me.id
         AND m.created_at > COALESCE(cr.last_read_at, me.created_at)
       GROUP BY m.channel_id
-    `);
-
-    const dmRows = await all<{ chat_id: string; count: number }>(sql`
+      UNION ALL
       SELECT sender_id AS chat_id, COUNT(*) AS count
       FROM chitabit.messages
       WHERE channel_id IS NULL
@@ -440,7 +451,7 @@ export const dbService = {
       GROUP BY sender_id
     `);
 
-    for (const row of [...channelRows, ...dmRows]) {
+    for (const row of rows) {
       counts[row.chat_id] = Number(row.count);
     }
     return counts;
@@ -512,6 +523,7 @@ export const dbService = {
           dmRecipientId: string | null;
           senderId: string;
           senderUsername: string;
+          sender?: UserRow;
           messageLanguage?: string | null;
           content: string;
           attachmentUrl?: string | null;
@@ -536,6 +548,7 @@ export const dbService = {
       dmRecipientId: string | null;
       senderId: string;
       senderUsername: string;
+      sender?: UserRow;
       messageLanguage?: string | null;
       content: string;
       attachmentUrl?: string | null;
@@ -562,7 +575,7 @@ export const dbService = {
       params = paramsOrId;
     }
 
-    const user = await this.getUserById(params.senderId);
+    const user = params.sender ?? await this.getUserById(params.senderId);
     const resolvedLanguage = params.messageLanguage || user?.message_language || 'typescript';
     const createdAt = Date.now();
 
@@ -729,22 +742,31 @@ function dmBetween(first: string, second: string) {
 }
 
 async function loadMessages(filter: SQL): Promise<MessageWithReactions[]> {
-  const rows = await all<Omit<MessageWithReactions, 'reactions' | 'sender_is_bot'> & { sender_is_bot: number }>(sql`
+  const rows = await all<Omit<MessageWithReactions, 'sender_is_bot'> & { sender_is_bot: number }>(sql`
     SELECT m.*, u.display_name AS sender_display_name, u.avatar_color AS sender_avatar_color,
       u.avatar_url AS sender_avatar_url, u.file_icon AS sender_file_icon,
-      u.message_language AS sender_message_language, u.is_bot AS sender_is_bot
+      u.message_language AS sender_message_language, u.is_bot AS sender_is_bot,
+      COALESCE((
+        SELECT jsonb_agg(jsonb_build_object('emoji', grouped.emoji, 'count', grouped.count, 'users', grouped.users)
+                         ORDER BY grouped.first_at, grouped.emoji)
+        FROM (
+          SELECT r.emoji, count(*) AS count, array_agg(r.user_id ORDER BY r.created_at, r.id) AS users,
+            min(r.created_at) AS first_at
+          FROM chitabit.reactions r
+          WHERE r.message_id = m.id
+          GROUP BY r.emoji
+        ) grouped
+      ), '[]'::jsonb) AS reactions
     FROM chitabit.messages m
     JOIN chitabit.users u ON m.sender_id = u.id
     WHERE m.deleted_at IS NULL AND ${filter}
   `);
-  const reactions = await dbService.getReactionsForMessages(rows.map(({ id }) => id));
   return rows.map((row) => ({
     ...row,
     sender_is_bot: Boolean(row.sender_is_bot),
     sender_file_icon: row.sender_file_icon || 'ts',
     sender_message_language: row.sender_message_language || 'typescript',
     message_language: row.message_language || row.sender_message_language || 'typescript',
-    reactions: reactions.get(row.id) || [],
   }));
 }
 

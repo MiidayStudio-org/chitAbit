@@ -1,3 +1,5 @@
+import { once } from 'node:events';
+import request from 'supertest';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { io as connect, Socket } from 'socket.io-client';
 import type { AddressInfo } from 'net';
@@ -37,6 +39,81 @@ afterAll(async () => {
 });
 
 describe('Socket authentication', () => {
+  it('delivers a message while an earlier draft lookup is pending and discards the stale draft', async () => {
+    const sender = await makeUser('draftsender');
+    const recipient = await makeUser('draftreceiver');
+    const a = open(sender.token);
+    const b = open(recipient.token);
+    for (const client of [a, b]) {
+      if (!client.connected) await once(client, 'connect');
+      const joined = once(client, 'presence:update');
+      client.emit('user:join');
+      await joined;
+    }
+
+    let lookupStarted!: () => void;
+    const started = new Promise<void>((resolve) => { lookupStarted = resolve; });
+    let finishLookup!: () => void;
+    const blocked = new Promise<void>((resolve) => { finishLookup = resolve; });
+    const lookup = vi.spyOn(dbService, 'getLiveDraftSender').mockImplementationOnce(async () => {
+      lookupStarted();
+      await blocked;
+      return { id: sender.id, username: sender.username };
+    });
+    const drafts: string[] = [];
+    b.on('draft:update', (draft) => drafts.push(draft.text));
+
+    try {
+      a.emit('draft:update', { dmRecipientId: recipient.id, text: 'old draft' });
+      await started;
+      a.emit('draft:update', { dmRecipientId: recipient.id, text: 'queued draft' });
+      const delivered = once(b, 'message:new', { signal: AbortSignal.timeout(1500) });
+      a.emit('message:send', { dmRecipientId: recipient.id, content: 'sent message' });
+      expect((await delivered)[0].content).toBe('sent message');
+
+      finishLookup();
+      const nextDraft = once(b, 'draft:update', { signal: AbortSignal.timeout(1500) });
+      a.emit('draft:update', { dmRecipientId: recipient.id, text: 'new draft' });
+      await nextDraft;
+      expect(drafts).toEqual(['new draft']);
+    } finally {
+      finishLookup();
+      lookup.mockRestore();
+      a.close();
+      b.close();
+    }
+  });
+
+  it('acknowledges a saved message and deduplicates retries across Socket.IO and HTTP', async () => {
+    const sender = await makeUser('retrysender');
+    const recipient = await makeUser('retryrecipient');
+    const client = open(sender.token);
+    if (!client.connected) await once(client, 'connect');
+    const joined = once(client, 'presence:update');
+    client.emit('user:join');
+    await joined;
+
+    const payload = { dmRecipientId: recipient.id, content: 'same text', localTempId: 'temp_first' };
+    const delivered = once(client, 'message:new', { signal: AbortSignal.timeout(1500) });
+    // Save without an acknowledgement callback, like a client that lost its acknowledgement.
+    client.emit('message:send', payload);
+    const [original] = await delivered;
+
+    const [acknowledged, http] = await Promise.all([
+      client.timeout(1500).emitWithAck('message:send', payload),
+      request(url).post('/api/messages/send').set('Authorization', `Bearer ${sender.token}`).send(payload),
+    ]);
+    expect(acknowledged).toMatchObject({ success: true, message: { id: original.id } });
+    expect(http.body).toMatchObject({ success: true, message: { id: original.id } });
+    expect(await dbService.getDMMessages(sender.id, recipient.id)).toHaveLength(1);
+
+    const separate = await client.timeout(1500).emitWithAck('message:send', { ...payload, localTempId: 'temp_second' });
+    expect(separate.success).toBe(true);
+    expect(separate.message.id).not.toBe(original.id);
+    expect(await dbService.getDMMessages(sender.id, recipient.id)).toHaveLength(2);
+    client.close();
+  });
+
   it('rejects a socket without a valid token', async () => {
     const err = await new Promise<Error>((resolve) => {
       const s = open('garbage');

@@ -94,18 +94,21 @@ router.get('/sync', asyncRoute(async (req: Request, res: Response) => {
 // The composer uses this route while its socket is disconnected.
 router.post('/send', asyncRoute(async (req: Request, res: Response) => {
   let failure: { status: number; message: string } | undefined;
+  let cleared = false;
   const message = await sendChatMessage(io, req.auth!, req.body ?? {}, (event, text) => {
-    if (event === 'chat:clear' || !text) return;
+    if (event === 'chat:clear') cleared = true;
+    if (!text) return;
     failure = { status: event === 'message:rate_limit' ? 429 : 400, message: text };
   });
+  if (cleared) {
+    res.json({ success: true, cleared: true });
+    return;
+  }
   if (!message) {
     res.status(failure?.status ?? 400).json({ error: failure?.message ?? 'Message content required' });
     return;
   }
-  res.status(201).json({
-    success: true,
-    message: { ...message, localTempId: typeof req.body?.localTempId === 'string' ? req.body.localTempId : null },
-  });
+  res.status(201).json({ success: true, message });
 }));
 
 // 4. Edit your own message

@@ -1,5 +1,6 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { Server, Socket } from 'socket.io';
-import { dbService, MessageWithReactions } from '../db/index.js';
+import { dbService, MessageWithReactions, type UserRow } from '../db/index.js';
 import { checkRateLimit, checkDraftRateLimit, checkBotRateLimit } from '../middleware/rateLimiter.js';
 import { sanitizeText, sanitizeDraftText } from '../middleware/sanitize.js';
 import { parseSlashCommand } from '../services/slashCommands.js';
@@ -134,14 +135,28 @@ export function registerChatHandlers(io: Server) {
 
     // Process events from one socket in order, including joins and switches.
     let pending = Promise.resolve();
-    const on = <T extends object>(event: string, handler: (data: Partial<T>) => void | Promise<void>) => {
-      socket.on(event, (data: unknown) => {
-        if (data !== undefined && (data === null || typeof data !== 'object')) return;
+    const on = <T extends object>(
+      event: string,
+      handler: (data: Partial<T>, acknowledge?: (result: MessageSendResult) => void) => void | Promise<void>,
+    ) => {
+      socket.on(event, (data: unknown, callback?: unknown) => {
+        const acknowledge = typeof callback === 'function' ? callback as (result: MessageSendResult) => void : undefined;
+        if (data !== undefined && (data === null || typeof data !== 'object')) {
+          if (event === 'message:send') acknowledge?.({ success: false, error: 'Invalid message payload' });
+          return;
+        }
+        if (event === 'message:send' || event === 'draft:clear' || event === 'channel:switch' || event === 'dm:switch') {
+          // Invalidate drafts as the event enters the queue, before any SQL work.
+          draftRevision++;
+          latestDraft = undefined;
+        }
         pending = pending.then(async () => {
-          if (socket.connected) await handler((data ?? {}) as Partial<T>);
+          if (socket.connected) await handler((data ?? {}) as Partial<T>, acknowledge);
         }).catch(() => {
           console.error(`[Socket] "${event}" failed for ${me.userId}`);
-          socket.emit('error', { message: 'Something went wrong handling your request' });
+          const error = 'Something went wrong handling your request';
+          socket.emit('error', { message: error });
+          if (event === 'message:send') acknowledge?.({ success: false, error });
         });
       });
     };
@@ -233,11 +248,21 @@ export function registerChatHandlers(io: Server) {
       broadcastPresence(io);
     });
 
-    on<MessageInput>('message:send', async (data) => {
-      await sendChatMessage(io, me, data, (event, message) => {
-        if (message === undefined) socket.emit(event);
-        else socket.emit(event, { message });
+    on<MessageInput>('message:send', async (data, acknowledge) => {
+      let error: string | undefined;
+      let cleared = false;
+      const message = await sendChatMessage(io, me, data, (event, text) => {
+        if (event === 'chat:clear') {
+          cleared = true;
+          socket.emit(event);
+        } else if (text) {
+          error = text;
+          socket.emit(event, { message: text });
+        }
       });
+      if (message) acknowledge?.({ success: true, message });
+      else if (cleared) acknowledge?.({ success: true, cleared: true });
+      else acknowledge?.({ success: false, error: error ?? 'Message content required' });
     });
 
     // 5. Message Read Receipt (the reader is always the logged-in user)
@@ -316,30 +341,34 @@ export function registerChatHandlers(io: Server) {
     on<{ channelId: string; dmRecipientId: string }>('typing:stop', (data) => emitTyping(data, false));
 
     // 10. Live Draft Mirroring
-    on<{
+    type DraftInput = Partial<{
       channelId: string | null;
       dmRecipientId: string | null;
       text: string;
       cursorPos: number;
       messageLanguage: string;
-    }>('draft:update', async (data) => {
+    }>;
+    type DraftUpdate = { data: DraftInput; after: Promise<void>; revision: number };
+    let latestDraft: DraftUpdate | undefined;
+    let draftRevision = 0;
+    let processingDraft = false;
+
+    async function publishDraft({ data, revision }: DraftUpdate) {
       if (!socket.data.user) return;
-      const sender = await dbService.getUserById(me.userId);
-      if (!sender) return;
-
-      // Opt-out check: user disabled live typing
-      if (sender.share_live_typing === 0) return;
-
-      // Never broadcast slash commands or devbot DMs
+      // Never broadcast slash commands or DevBot DMs.
       if (typeof data.text !== 'string' || !data.text || data.text.startsWith('/') || data.dmRecipientId === 'devbot') {
-        clearUserDraft(io, sender.id, data.channelId, data.dmRecipientId);
+        clearUserDraft(io, me.userId, data.channelId, data.dmRecipientId);
         return;
       }
 
-      if (!checkDraftRateLimit(sender.id)) return;
+      const target = isId(data.channelId)
+        ? { channelId: data.channelId, dmRecipientId: null }
+        : { channelId: null, dmRecipientId: isId(data.dmRecipientId) ? data.dmRecipientId : null };
+      if (!target.channelId && (!target.dmRecipientId || target.dmRecipientId === me.userId)) return;
+      if (!checkDraftRateLimit(me.userId)) return;
 
-      const target = await resolveTarget(data.channelId, data.dmRecipientId);
-      if (!target || target.dmRecipientId === sender.id || !socket.connected) return;
+      const sender = await dbService.getLiveDraftSender(me.userId, target);
+      if (!sender || !socket.connected || revision !== draftRevision) return;
 
       const text = sanitizeDraftText(data.text.slice(0, 4000));
 
@@ -368,6 +397,29 @@ export function registerChatHandlers(io: Server) {
       } else if (target.dmRecipientId) {
         io.to(`user:${target.dmRecipientId}`).emit('draft:update', draft);
       }
+    }
+
+    async function processDrafts() {
+      processingDraft = true;
+      try {
+        while (latestDraft) {
+          const update = latestDraft;
+          latestDraft = undefined;
+          await update.after;
+          if (socket.connected && update.revision === draftRevision) await publishDraft(update);
+        }
+      } catch {
+        console.error(`[Socket] Draft update failed for ${me.userId}`);
+      } finally {
+        processingDraft = false;
+        if (latestDraft) void processDrafts();
+      }
+    }
+
+    socket.on('draft:update', (data: unknown) => {
+      if (!data || typeof data !== 'object') return;
+      latestDraft = { data: data as DraftInput, after: pending, revision: ++draftRevision };
+      if (!processingDraft) void processDrafts();
     });
 
     on<{ channelId: string | null; dmRecipientId: string | null }>('draft:clear', (data) => {
@@ -377,6 +429,8 @@ export function registerChatHandlers(io: Server) {
 
     // 11. Disconnect
     socket.on('disconnect', () => {
+      draftRevision++;
+      latestDraft = undefined;
       if (socket.data.user) {
         clearAllUserDrafts(io, me.userId);
       }
@@ -386,7 +440,14 @@ export function registerChatHandlers(io: Server) {
   });
 }
 
+type SentMessage = MessageWithReactions & { localTempId?: string };
+type MessageSendResult =
+  | { success: true; message: SentMessage }
+  | { success: true; cleared: true }
+  | { success: false; error: string };
+
 interface MessageInput {
+  localTempId: string;
   channelId: string | null;
   dmRecipientId: string | null;
   content: string;
@@ -402,14 +463,21 @@ export async function sendChatMessage(
   me: AuthPayload,
   data: Partial<MessageInput>,
   notify: (event: 'error' | 'message:rate_limit' | 'chat:clear', message?: string) => void,
-): Promise<MessageWithReactions | undefined> {
-  const sender = await dbService.getUserById(me.userId);
+): Promise<SentMessage | undefined> {
+  const localTempId = data.localTempId;
+  if (localTempId !== undefined && (typeof localTempId !== 'string' || !/^[\w-]{1,100}$/.test(localTempId))) {
+    notify('error', 'Invalid send ID');
+    return;
+  }
+  const [sender, target] = await Promise.all([
+    dbService.getUserById(me.userId),
+    resolveTarget(data.channelId, data.dmRecipientId),
+  ]);
   if (!sender) {
     notify('error', 'Invalid sender profile');
     return;
   }
 
-  const target = await resolveTarget(data.channelId, data.dmRecipientId);
   if (!target) {
     notify('error', 'Unknown channel or recipient');
     return;
@@ -420,6 +488,17 @@ export async function sendChatMessage(
     notify('error', `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`);
     return;
   }
+
+  const messageId = localTempId
+    ? `msg_send_${createHash('sha256').update(JSON.stringify([sender.id, localTempId])).digest('hex')}`
+    : `msg_${randomUUID()}`;
+
+  const findSavedMessage = async () => {
+    const existing = await dbService.getMessageById(messageId);
+    if (!existing || existing.sender_id !== sender.id || existing.channel_id !== target.channelId ||
+        existing.dm_recipient_id !== target.dmRecipientId) return undefined;
+    return { ...existing, localTempId };
+  };
 
   // Attachments must point at a file we stored ourselves (no javascript: or external URLs)
   let attachment: { url: string; type: string; name: string; size: number | null } | null = null;
@@ -439,6 +518,8 @@ export async function sendChatMessage(
 
   const rateCheck = checkRateLimit(sender.id);
   if (!rateCheck.allowed) {
+    const existing = localTempId ? await findSavedMessage() : undefined;
+    if (existing) return existing;
     notify('message:rate_limit', `Slow down! You are sending messages too quickly. Please wait ${Math.ceil((rateCheck.retryAfterMs || 1000) / 1000)}s.`);
     return;
   }
@@ -467,109 +548,54 @@ export async function sendChatMessage(
     });
   };
 
-  // Slash commands (only if no attachment)
-  if (!attachment) {
-    const slashResult = parseSlashCommand(rawContent);
-
-    if (slashResult.isCommand) {
-      if (slashResult.isClientOnly && slashResult.command === 'clear') {
-        notify('chat:clear');
-        return;
-      }
-
-      if (slashResult.handledDirectly && slashResult.resultText) {
-        return saveAndBroadcastMessage({
-          io,
-          ...target,
-          senderId: sender.id,
-          senderUsername: sender.username,
-          messageLanguage,
-          content: slashResult.resultText,
-        });
-      }
-
-      if (slashResult.isDevBotAsk && slashResult.askQuery) {
-        const askQuery = sanitizeText(slashResult.askQuery);
-        const trigger = await saveAndBroadcastMessage({
-          io,
-          ...target,
-          senderId: sender.id,
-          senderUsername: sender.username,
-          messageLanguage,
-          content: `/ask ${askQuery}`,
-        });
-
-        askDevBot(trigger.id, askQuery);
-        return trigger;
-      }
-    }
+  const slash = attachment ? undefined : parseSlashCommand(rawContent);
+  if (slash?.isClientOnly && slash.command === 'clear') {
+    notify('chat:clear');
+    return;
   }
 
-  // Normal message
+  const askQuery = slash?.isDevBotAsk && slash.askQuery ? sanitizeText(slash.askQuery) : undefined;
   const sanitized = sanitizeText(rawContent);
-  if (!sanitized && !attachment) return;
+  const content = askQuery !== undefined ? `/ask ${askQuery}`
+    : slash?.handledDirectly && slash.resultText ? slash.resultText : sanitized;
+  if (!content && !attachment) return;
 
-  const saved = await saveAndBroadcastMessage({
-    io,
-    ...target,
-    senderId: sender.id,
-    senderUsername: sender.username,
-    messageLanguage,
-    content: sanitized,
-    attachmentUrl: attachment?.url,
-    attachmentType: attachment?.type,
-    attachmentName: attachment?.name,
-    attachmentSize: attachment?.size,
-  });
-
-  // DevBot replies on a DM to DevBot, or an @devbot mention
-  const isDmWithDevBot = target.dmRecipientId === 'devbot';
-  const isDevBotMentioned = /@devbot\b/i.test(sanitized);
-
-  if ((isDmWithDevBot || isDevBotMentioned) && sanitized) {
-    const query = sanitized.replace(/@devbot/gi, '').trim() || sanitized;
-    askDevBot(saved.id, query);
+  let message: SentMessage;
+  try {
+    const saved = await dbService.createMessage({
+      id: messageId,
+      ...target,
+      senderId: sender.id,
+      sender,
+      senderUsername: sender.username,
+      messageLanguage,
+      content,
+      attachmentUrl: attachment?.url,
+      attachmentType: attachment?.type,
+      attachmentName: attachment?.name,
+      attachmentSize: attachment?.size,
+    });
+    message = localTempId ? { ...saved, localTempId } : saved;
+  } catch (error) {
+    const databaseError = (error as { cause?: { code?: string }; code?: string });
+    if (!localTempId || (databaseError.cause?.code ?? databaseError.code) !== '23505') throw error;
+    const existing = await findSavedMessage();
+    if (!existing) notify('error', 'Send ID was already used');
+    return existing;
   }
-  return saved;
-}
 
-async function saveAndBroadcastMessage(params: {
-  io: Server;
-  channelId: string | null;
-  dmRecipientId: string | null;
-  senderId: string;
-  senderUsername: string;
-  messageLanguage?: string | null;
-  content: string;
-  attachmentUrl?: string | null;
-  attachmentType?: string | null;
-  attachmentName?: string | null;
-  attachmentSize?: number | null;
-}): Promise<MessageWithReactions> {
-  // Clear any active draft immediately upon saving/broadcasting real message
-  clearUserDraft(params.io, params.senderId, params.channelId, params.dmRecipientId);
+  clearUserDraft(io, sender.id, target.channelId, target.dmRecipientId);
+  emitToMessageAudience(io, message, 'message:new', message);
+  if (target.channelId) {
+    void markChannelReadForViewers(target.channelId, message.created_at).catch(() => {
+      console.error('[Socket] Could not update channel read state');
+    });
+  }
 
-  const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const message = await dbService.createMessage({
-    id: messageId,
-    channelId: params.channelId,
-    dmRecipientId: params.dmRecipientId,
-    senderId: params.senderId,
-    senderUsername: params.senderUsername,
-    messageLanguage: params.messageLanguage || null,
-    content: params.content,
-    attachmentUrl: params.attachmentUrl,
-    attachmentType: params.attachmentType,
-    attachmentName: params.attachmentName,
-    attachmentSize: params.attachmentSize,
-  });
-
-  if (params.channelId) {
-    params.io.to(`channel:${params.channelId}`).emit('message:new', message);
-    await markChannelReadForViewers(params.channelId, message.created_at);
-  } else if (params.dmRecipientId) {
-    params.io.to(`user:${params.senderId}`).emit('message:new', message);
-    params.io.to(`user:${params.dmRecipientId}`).emit('message:new', message);
+  if (askQuery !== undefined) {
+    askDevBot(message.id, askQuery);
+  } else if (!slash?.handledDirectly && (target.dmRecipientId === 'devbot' || /@devbot\b/i.test(sanitized)) && sanitized) {
+    askDevBot(message.id, sanitized.replace(/@devbot/gi, '').trim() || sanitized);
   }
 
   return message;

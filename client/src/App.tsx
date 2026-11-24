@@ -41,6 +41,26 @@ const DEFAULT_TABS: OpenTab[] = [
   },
 ];
 
+type SendResult = { success: true; message: Message } | { success: true; cleared: true } | { success: false };
+type UpdateMessages = React.Dispatch<React.SetStateAction<Message[]>>;
+type SendAttachment = { url: string; type: string; name: string; size: number };
+
+function mergeDeliveredMessage(messages: Message[], delivered: Message, localTempId?: string): Message[] {
+  const pending = localTempId ? messages.findIndex((message) => message.id === localTempId) : -1;
+  if (messages.some((message) => message.id === delivered.id)) {
+    return pending < 0 ? messages : messages.filter((message) => message.id !== localTempId);
+  }
+  if (pending < 0) return [...messages, delivered];
+  return messages.map((message, index) => index === pending ? delivered : message);
+}
+
+function preservePendingMessages(history: Message[], previous: Message[], chat: ActiveChat, userId: string) {
+  return [...history, ...previous.filter((message) =>
+    (message.status === 'pending' || message.status === 'failed') && message.sender_id === userId &&
+    (chat.type === 'channel' ? message.channel_id === chat.id : message.dm_recipient_id === chat.id)
+  )];
+}
+
 export const App: React.FC = () => {
   const { user, isLoading: isAuthLoading, logout, updateProfile } = useAuth();
   const { socket, onlineUsers } = useSocket();
@@ -285,7 +305,9 @@ export const App: React.FC = () => {
       fetchUnreadCounts();
 
       if (activeChat && messages.length > 0) {
-        const lastTimestamp = Math.max(...messages.map((m) => m.created_at || 0));
+        const lastTimestamp = messages.reduce((latest, message) =>
+          message.status === 'pending' || message.status === 'failed' ? latest : Math.max(latest, message.created_at),
+        0);
         try {
           let url = `/api/messages/sync?since=${lastTimestamp}`;
           if (activeChat.type === 'channel') {
@@ -546,7 +568,7 @@ export const App: React.FC = () => {
         const res = await fetch(`/api/channels/${activeChat.id}/messages?limit=40`);
         const data = await res.json();
         const msgList = Array.isArray(data) ? data : (data.messages || []);
-        setMessages(msgList);
+        setMessages((previous) => preservePendingMessages(msgList, previous, activeChat, user.id));
         setHasMoreOlderMessages(msgList.length >= 40);
         setUnreadCounts((prev) => ({ ...prev, [activeChat.id]: 0 }));
 
@@ -566,7 +588,7 @@ export const App: React.FC = () => {
         const res = await fetch(`/api/messages/dm/${user.id}/${activeChat.id}?limit=40`);
         const data = await res.json();
         const msgList = Array.isArray(data) ? data : (data.messages || []);
-        setMessages(msgList);
+        setMessages((previous) => preservePendingMessages(msgList, previous, activeChat, user.id));
         setHasMoreOlderMessages(msgList.length >= 40);
         setUnreadCounts((prev) => ({ ...prev, [activeChat.id]: 0 }));
 
@@ -620,14 +642,14 @@ export const App: React.FC = () => {
         const res = await fetch(`/api/channels/${splitChat.id}/messages?limit=40`);
         const data = await res.json();
         const msgList = data.messages || [];
-        setSplitMessages(msgList);
+        setSplitMessages((previous) => preservePendingMessages(msgList, previous, splitChat, user.id));
         setSplitHasMoreOlderMessages(msgList.length >= 40);
         setUnreadCounts((prev) => ({ ...prev, [splitChat.id]: 0 }));
       } else if (splitChat.type === 'dm') {
         const res = await fetch(`/api/messages/dm/${user.id}/${splitChat.id}?limit=40`);
         const data = await res.json();
         const msgList = data.messages || [];
-        setSplitMessages(msgList);
+        setSplitMessages((previous) => preservePendingMessages(msgList, previous, splitChat, user.id));
         setSplitHasMoreOlderMessages(msgList.length >= 40);
         setUnreadCounts((prev) => ({ ...prev, [splitChat.id]: 0 }));
       }
@@ -728,22 +750,11 @@ export const App: React.FC = () => {
           (msg.sender_id === user.id && msg.dm_recipient_id === activeChat.id));
 
       if (isForCurrentChannel || isForCurrentDM) {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id)) return prev;
-
-          // Reconcile optimistic pending message if sent by me
-          if (msg.sender_id === user.id) {
-            const pendingIdx = prev.findIndex(
-              (m) => (m.status === 'pending' || m.id.startsWith('temp_')) && m.content === msg.content
-            );
-            if (pendingIdx !== -1) {
-              const updated = [...prev];
-              updated[pendingIdx] = { ...msg, status: 'delivered' };
-              return updated;
-            }
-          }
-          return [...prev, { ...msg, status: 'delivered' }];
-        });
+        setMessages((previous) => mergeDeliveredMessage(
+          previous,
+          { ...msg, status: 'delivered' },
+          msg.sender_id === user.id ? msg.localTempId : undefined,
+        ));
 
         // Mark read immediately if viewing this DM
         if (activeChat?.type === 'dm' && msg.sender_id === activeChat.id) {
@@ -789,10 +800,11 @@ export const App: React.FC = () => {
             (msg.sender_id === user.id && msg.dm_recipient_id === splitChat.id));
 
         if (isForSplitChannel || isForSplitDM) {
-          setSplitMessages((prev) => {
-            if (prev.some((m) => m.id === msg.id)) return prev;
-            return [...prev, msg];
-          });
+          setSplitMessages((previous) => mergeDeliveredMessage(
+            previous,
+            { ...msg, status: 'delivered' },
+            msg.sender_id === user.id ? msg.localTempId : undefined,
+          ));
         }
       }
 
@@ -1097,20 +1109,60 @@ export const App: React.FC = () => {
     }
   };
 
-  // Message sending with Optimistic UI & Lifecycle states
-  const handleSendMessage = (
-    content: string,
-    attachment?: { url: string; type: string; name: string; size: number }
-  ) => {
-    if (!user || !activeChat) return;
+  const submitMessage = async (message: Message, update: UpdateMessages) => {
+    const localTempId = message.localTempId ?? message.id;
+    const payload = {
+      channelId: message.channel_id,
+      dmRecipientId: message.dm_recipient_id,
+      content: message.content,
+      messageLanguage: message.message_language,
+      attachmentUrl: message.attachment_url,
+      attachmentType: message.attachment_type,
+      attachmentName: message.attachment_name,
+      attachmentSize: message.attachment_size,
+      localTempId,
+    };
+    let result: SendResult | undefined;
+    if (socket?.connected) {
+      try {
+        result = await socket.timeout(5000).emitWithAck('message:send', payload);
+      } catch {
+        // The server may have saved the message before the acknowledgement was lost.
+      }
+    }
+    if (!result) {
+      try {
+        const response = await fetch('/api/messages/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(8000),
+        });
+        result = await response.json();
+      } catch {
+        result = { success: false };
+      }
+    }
+    const outcome = result;
+    update((previous) => {
+      if (!previous.some((item) => item.id === localTempId)) return previous;
+      if (outcome?.success && 'message' in outcome) {
+        return mergeDeliveredMessage(previous, { ...outcome.message, status: 'delivered' }, localTempId);
+      }
+      if (outcome?.success && 'cleared' in outcome) {
+        return previous.filter((item) => item.id !== localTempId);
+      }
+      return previous.map((item) => item.id === localTempId ? { ...item, status: 'failed' } : item);
+    });
+  };
 
-    const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const isConnected = Boolean(socket?.connected);
-
+  const queueMessage = (chat: ActiveChat, content: string, update: UpdateMessages, attachment?: SendAttachment) => {
+    if (!user) return;
+    const tempId = `temp_${crypto.randomUUID()}`;
     const optimisticMsg: Message = {
       id: tempId,
-      channel_id: activeChat.type === 'channel' ? activeChat.id : null,
-      dm_recipient_id: activeChat.type === 'dm' ? activeChat.id : null,
+      channel_id: chat.type === 'channel' ? chat.id : null,
+      dm_recipient_id: chat.type === 'dm' ? chat.id : null,
       sender_id: user.id,
       sender_username: user.username,
       sender_display_name: user.displayName || user.username,
@@ -1132,116 +1184,20 @@ export const App: React.FC = () => {
       localTempId: tempId,
     };
 
-    setMessages((prev) => [...prev, optimisticMsg]);
-
-    const payload = {
-      channelId: activeChat.type === 'channel' ? activeChat.id : null,
-      dmRecipientId: activeChat.type === 'dm' ? activeChat.id : null,
-      content,
-      senderId: user.id,
-      senderUsername: user.username,
-      senderFileIcon: user.fileIcon || 'ts',
-      messageLanguage: user.messageLanguage || 'typescript',
-      attachmentUrl: attachment?.url || null,
-      attachmentType: attachment?.type || null,
-      attachmentName: attachment?.name || null,
-      attachmentSize: attachment?.size || null,
-      localTempId: tempId,
-    };
-
-    if (isConnected && socket) {
-      socket.emit('message:send', payload);
-      setTimeout(() => {
-        setMessages((prev) =>
-          prev.map((m) => (m.id === tempId && m.status === 'pending' ? { ...m, status: 'failed' } : m))
-        );
-      }, 8000);
-    } else {
-      // Universal REST fallback for Edge/Cloudflare Workers
-      fetch('/api/messages/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.success && data.message) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === tempId || m.localTempId === tempId
-                  ? { ...data.message, status: 'sent' }
-                  : m
-              )
-            );
-          } else {
-            setMessages((prev) =>
-              prev.map((m) => (m.id === tempId ? { ...m, status: 'failed' } : m))
-            );
-          }
-        })
-        .catch(() => {
-          setMessages((prev) =>
-            prev.map((m) => (m.id === tempId ? { ...m, status: 'failed' } : m))
-          );
-        });
-    }
+    update((previous) => [...previous, optimisticMsg]);
+    void submitMessage(optimisticMsg, update);
   };
 
-  const handleRetryMessage = useCallback(
-    (msg: Message) => {
-      if (!user) return;
-      setMessages((prev) =>
-        prev.map((m) => (m.id === msg.id ? { ...m, status: 'pending' } : m))
-      );
+  const handleSendMessage = (content: string, attachment?: SendAttachment) => {
+    if (activeChat) queueMessage(activeChat, content, setMessages, attachment);
+  };
 
-      const payload = {
-        channelId: msg.channel_id,
-        dmRecipientId: msg.dm_recipient_id,
-        content: msg.content,
-        senderId: user.id,
-        senderUsername: user.username,
-        senderFileIcon: user.fileIcon || 'ts',
-        messageLanguage: user.messageLanguage || 'typescript',
-        attachmentUrl: msg.attachment_url,
-        attachmentType: msg.attachment_type,
-        attachmentName: msg.attachment_name,
-        attachmentSize: msg.attachment_size,
-        localTempId: msg.id,
-      };
+  const retryMessage = (message: Message, update: UpdateMessages) => {
+    update((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'pending' } : item));
+    void submitMessage(message, update);
+  };
 
-      if (socket?.connected) {
-        socket.emit('message:send', payload);
-      } else {
-        fetch('/api/messages/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.success && data.message) {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === msg.id || m.localTempId === msg.id
-                    ? { ...data.message, status: 'sent' }
-                    : m
-                )
-              );
-            } else {
-              setMessages((prev) =>
-                prev.map((m) => (m.id === msg.id ? { ...m, status: 'failed' } : m))
-              );
-            }
-          })
-          .catch(() => {
-            setMessages((prev) =>
-              prev.map((m) => (m.id === msg.id ? { ...m, status: 'failed' } : m))
-            );
-          });
-      }
-    },
-    [socket, user]
-  );
+  const handleRetryMessage = (message: Message) => retryMessage(message, setMessages);
 
   const handleTyping = (isTyping: boolean) => {
     if (!socket || !user || !activeChat) return;
@@ -1253,25 +1209,8 @@ export const App: React.FC = () => {
     });
   };
 
-  const handleSendSplitMessage = (
-    content: string,
-    attachment?: { url: string; type: string; name: string; size: number }
-  ) => {
-    if (!socket || !user || !splitChat) return;
-
-    socket.emit('message:send', {
-      channelId: splitChat.type === 'channel' ? splitChat.id : null,
-      dmRecipientId: splitChat.type === 'dm' ? splitChat.id : null,
-      content,
-      senderId: user.id,
-      senderUsername: user.username,
-      senderFileIcon: user.fileIcon || 'ts',
-      messageLanguage: user.messageLanguage || 'typescript',
-      attachmentUrl: attachment?.url || null,
-      attachmentType: attachment?.type || null,
-      attachmentName: attachment?.name || null,
-      attachmentSize: attachment?.size || null,
-    });
+  const handleSendSplitMessage = (content: string, attachment?: SendAttachment) => {
+    if (splitChat) queueMessage(splitChat, content, setSplitMessages, attachment);
   };
 
   const handleSplitTyping = (isTyping: boolean) => {
@@ -1615,7 +1554,7 @@ export const App: React.FC = () => {
                           onToggleReaction={handleToggleReaction}
                           onAskBot={(prompt) => handleSendSplitMessage(`/ask ${prompt}`)}
                           onReply={(msg) => setSplitReplyingTo(msg)}
-                          onRetryMessage={handleRetryMessage}
+                          onRetryMessage={(message) => retryMessage(message, setSplitMessages)}
                           onLoadOlderMessages={handleLoadOlderMessages}
                           hasMoreOlderMessages={splitHasMoreOlderMessages}
                           onOpenUserProfile={handleOpenUserProfile}

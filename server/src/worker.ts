@@ -456,14 +456,23 @@ export default {
         const content = (body.content || '').trim();
         if (!content) return errorResponse('Message content required', 400, cors);
 
-        const id = `m_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const localTempId = body.localTempId;
+        if (localTempId !== undefined && (typeof localTempId !== 'string' || !/^[\w-]{1,100}$/.test(localTempId))) {
+          return errorResponse('Invalid send ID', 400, cors);
+        }
+        let id = `m_${crypto.randomUUID()}`;
+        if (localTempId) {
+          const key = new TextEncoder().encode(JSON.stringify([authUser.id, localTempId]));
+          const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', key));
+          id = 'msg_send_' + Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+        }
         const channelId = body.channelId || null;
         const dmRecipientId = body.dmRecipientId || null;
         const now = Date.now();
 
         await db.prepare(
           `INSERT INTO messages (id, channel_id, dm_recipient_id, sender_id, sender_username, message_language, content, attachment_url, attachment_type, attachment_name, attachment_size, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
         )
           .bind(
             id,
@@ -481,32 +490,17 @@ export default {
           )
           .run();
 
-        const sender: any = await db.prepare('SELECT * FROM users WHERE id = ?').bind(authUser.id).first();
-
-        const message = {
-          id,
-          channel_id: channelId,
-          dm_recipient_id: dmRecipientId,
-          sender_id: authUser.id,
-          sender_username: authUser.username,
-          sender_display_name: sender?.display_name || authUser.username,
-          sender_avatar_color: sender?.avatar_color || '#3b82f6',
-          sender_avatar_url: sender?.avatar_url || null,
-          sender_file_icon: sender?.file_icon || 'ts',
-          sender_message_language: body.messageLanguage || 'typescript',
-          message_language: body.messageLanguage || 'typescript',
-          content,
-          attachment_url: body.attachmentUrl || null,
-          attachment_type: body.attachmentType || null,
-          attachment_name: body.attachmentName || null,
-          attachment_size: body.attachmentSize || null,
-          created_at: now,
-          edited_at: null,
-          deleted_at: null,
-          reactions: [],
-          status: 'sent',
-          localTempId: body.localTempId || null,
-        };
+        const saved = await db.prepare(
+          `SELECT m.*, u.display_name AS sender_display_name, u.avatar_color AS sender_avatar_color,
+             u.avatar_url AS sender_avatar_url, u.file_icon AS sender_file_icon,
+             u.message_language AS sender_message_language
+           FROM messages m LEFT JOIN users u ON u.id = m.sender_id
+           WHERE m.id = ? AND m.sender_id = ? AND m.deleted_at IS NULL`
+        ).bind(id, authUser.id).first<{ channel_id: string | null; dm_recipient_id: string | null }>();
+        if (!saved || saved.channel_id !== channelId || saved.dm_recipient_id !== dmRecipientId) {
+          return errorResponse('Send ID was already used', 409, cors);
+        }
+        const message = { ...saved, reactions: [], localTempId: localTempId ?? null };
 
         return jsonResponse({ success: true, message }, 201, cors);
       } catch (err: any) {
