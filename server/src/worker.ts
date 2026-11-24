@@ -433,39 +433,53 @@ export default {
       return jsonResponse({ unreadCounts: {} }, 200, cors);
     }
 
-    // 6. Direct Messages fetch
+    // Chat history and incremental polling share the same conversation filters.
     const dmMatch = url.pathname.match(/^\/api\/messages\/dm\/([^/]+)\/([^/]+)$/);
-    if (dmMatch && request.method === 'GET') {
+    const channelMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/messages$/);
+    if ((dmMatch || channelMatch) && request.method === 'GET') {
+      if (!authUser) return errorResponse('Unauthorized', 401, cors);
       if (!db) return errorResponse('Database not initialized', 500, cors);
-      const [, u1, u2] = dmMatch;
-      const { results } = await db.prepare(
-        `SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon
-         FROM messages m
-         LEFT JOIN users u ON m.sender_id = u.id
-         WHERE (m.sender_id = ? AND m.dm_recipient_id = ?)
-            OR (m.sender_id = ? AND m.dm_recipient_id = ?)
-         ORDER BY m.created_at ASC LIMIT 50`
-      )
-        .bind(u1, u2, u2, u1)
-        .all();
-      return jsonResponse({ messages: results || [] }, 200, cors);
-    }
 
-    // 7. Channel Messages fetch
-    const chMsgMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/messages$/);
-    if (chMsgMatch && request.method === 'GET') {
-      if (!db) return errorResponse('Database not initialized', 500, cors);
-      const channelId = chMsgMatch[1];
+      let filter: string;
+      const params: (string | number)[] = [];
+      if (dmMatch) {
+        const [, first, second] = dmMatch;
+        if (authUser.id !== first && authUser.id !== second) {
+          return errorResponse('This conversation is private', 403, cors);
+        }
+        filter = 'm.channel_id IS NULL AND ((m.sender_id = ? AND m.dm_recipient_id = ?) OR (m.sender_id = ? AND m.dm_recipient_id = ?))';
+        params.push(first, second, second, first);
+      } else {
+        filter = 'm.channel_id = ?';
+        params.push(channelMatch![1]);
+      }
+
+      const limit = Math.min(Math.max(Math.trunc(Number(url.searchParams.get('limit'))) || 40, 1), 100);
+      const after = url.searchParams.get('after');
+      const afterId = url.searchParams.get('afterId');
+      const before = Number(url.searchParams.get('before'));
+      const ascending = after !== null;
+      if (ascending) {
+        const timestamp = Number(after);
+        if (!Number.isSafeInteger(timestamp) || timestamp < 0 || afterId === null || afterId.length > 150) {
+          return errorResponse('Invalid message cursor', 400, cors);
+        }
+        filter += ' AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))';
+        params.push(timestamp, timestamp, afterId);
+      } else if (Number.isSafeInteger(before) && before > 0) {
+        filter += ' AND m.created_at < ?';
+        params.push(before);
+      }
+
+      const order = ascending ? 'ASC' : 'DESC';
       const { results } = await db.prepare(
-        `SELECT m.*, u.display_name as sender_display_name, u.avatar_color as sender_avatar_color, u.avatar_url as sender_avatar_url, u.file_icon as sender_file_icon
-         FROM messages m
-         LEFT JOIN users u ON m.sender_id = u.id
-         WHERE m.channel_id = ?
-         ORDER BY m.created_at ASC LIMIT 50`
-      )
-        .bind(channelId)
-        .all();
-      return jsonResponse({ messages: results || [] }, 200, cors);
+        `SELECT m.*, u.display_name AS sender_display_name, u.avatar_color AS sender_avatar_color,
+           u.avatar_url AS sender_avatar_url, u.file_icon AS sender_file_icon
+         FROM messages m LEFT JOIN users u ON m.sender_id = u.id
+         WHERE ${filter}
+         ORDER BY m.created_at ${order}, m.id ${order} LIMIT ?`
+      ).bind(...params, limit).all();
+      return jsonResponse({ messages: ascending ? results : results.reverse() }, 200, cors);
     }
 
     // 7b. Send Message API (Edge Fallback & Universal REST Send)

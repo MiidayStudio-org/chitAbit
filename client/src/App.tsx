@@ -1,3 +1,4 @@
+import { useMessagePolling } from './utils/useMessagePolling';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from './context/AuthContext';
 import { socketEnabled, useSocket } from './context/SocketContext';
@@ -628,6 +629,7 @@ export const App: React.FC = () => {
   }, [user, activeChat, socket]);
 
   useEffect(() => {
+    if (!socketEnabled) return;
     fetchMessages();
     // In Edge/Serverless environments (Cloudflare Workers) where Socket.IO daemon
     // is offline, poll every 3.5s so messages update in real time
@@ -668,8 +670,53 @@ export const App: React.FC = () => {
   }, [user, splitChat]);
 
   useEffect(() => {
+    if (!socketEnabled) return;
     fetchSplitMessages();
   }, [fetchSplitMessages]);
+
+  const primaryPollingChat = !socketEnabled && user && activeChat?.id !== 'devbot' ? activeChat : null;
+  const splitPollingChat = !socketEnabled && user && splitChat?.id !== 'devbot' ? splitChat : null;
+
+  const applyPolledPage = useCallback((
+    chat: ActiveChat, userId: string, update: UpdateMessages,
+    setHasOlder: React.Dispatch<React.SetStateAction<boolean>>, page: Message[], initial: boolean,
+  ) => {
+    update((previous) => initial
+      ? preservePendingMessages(page, previous, chat, userId)
+      : page.reduce<Message[]>((merged, message) => mergeDeliveredMessage(merged, message), previous));
+    if (initial) {
+      setHasOlder(page.length >= 40);
+      setUnreadCounts((previous) => ({ ...previous, [chat.id]: 0 }));
+    }
+    const latest = page.at(-1);
+    if (latest) {
+      setLastMessages((previous) => ({
+        ...previous,
+        [`${chat.type}_${chat.id}`]: {
+          content: latest.content,
+          timestamp: latest.created_at,
+          senderId: latest.sender_id,
+          senderUsername: latest.sender_username,
+        },
+      }));
+    }
+  }, []);
+
+  const applyPrimaryPage = useCallback((page: Message[], initial: boolean) => {
+    if (user && primaryPollingChat) {
+      applyPolledPage(primaryPollingChat, user.id, setMessages, setHasMoreOlderMessages, page, initial);
+    }
+  }, [applyPolledPage, primaryPollingChat, user]);
+  const applySplitPage = useCallback((page: Message[], initial: boolean) => {
+    if (user && splitPollingChat) {
+      applyPolledPage(splitPollingChat, user.id, setSplitMessages, setSplitHasMoreOlderMessages, page, initial);
+    }
+  }, [applyPolledPage, splitPollingChat, user]);
+  const pollPath = (chat: ActiveChat | null) => chat && user
+    ? chat.type === 'channel' ? `/api/channels/${chat.id}/messages` : `/api/messages/dm/${user.id}/${chat.id}`
+    : undefined;
+  useMessagePolling(pollPath(primaryPollingChat), applyPrimaryPage);
+  useMessagePolling(pollPath(splitPollingChat), applySplitPage);
 
   // Tell the server which chat is open (live drafts, and unread tracking:
   // messages in the open chat are not counted as unread)
